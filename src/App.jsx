@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
+import { checkForAppUpdates } from './services/updater';
 import {
   Clock, Shield, Lock, AlertTriangle, CheckCircle, 
-  Send, Smartphone, Heart, Sparkles, X, MapPin, Wifi, QrCode, Key
+  Send, Smartphone, Heart, Sparkles, X, MapPin, Wifi, QrCode, Key, Download
 } from 'lucide-react';
 
 const SERVER_URLS = [
@@ -20,6 +21,13 @@ export default function App() {
   const [pairingCodeInput, setPairingCodeInput] = useState('');
   const [pairingError, setPairingError] = useState('');
   const [isPairingLoading, setIsPairingLoading] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState(null);
+
+  useEffect(() => {
+    checkForAppUpdates().then(info => {
+      if (info?.hasUpdate) setUpdateInfo(info);
+    });
+  }, []);
 
   // DADOS REAIS DE TELEMETRIA
   const [realBattery, setRealBattery] = useState(88);
@@ -291,6 +299,32 @@ export default function App() {
           <Wifi size={12} /> Sincronizado
         </span>
       </header>
+
+      {/* BANNER DE ATUALIZAÇÃO DO GITHUB */}
+      {updateInfo && (
+        <div style={{
+          padding: '16px 20px', borderRadius: '16px',
+          background: 'linear-gradient(135deg, var(--accent-cyan), #8338ec)',
+          color: 'white', display: 'flex', flexWrap: 'wrap', alignItems: 'center',
+          justifyContent: 'space-between', gap: '12px', boxShadow: '0 8px 24px rgba(58, 134, 255, 0.3)'
+        }}>
+          <div>
+            <h4 style={{ fontSize: '0.95rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Download size={18} /> Nova versão v{updateInfo.latestVersion} disponível!
+            </h4>
+            <p style={{ fontSize: '0.8rem', opacity: 0.9, marginTop: '2px' }}>{updateInfo.releaseNotes}</p>
+          </div>
+          <a 
+            href={updateInfo.downloadUrl} 
+            target="_blank" 
+            rel="noreferrer" 
+            className="btn" 
+            style={{ background: 'white', color: '#0f172a', fontWeight: 800, padding: '8px 14px', fontSize: '0.85rem' }}
+          >
+            Atualizar APK
+          </a>
+        </div>
+      )}
 
       {/* NOTIFICAÇÃO DE PEDIDO ENVIADO */}
       {requestSentNotice && (
