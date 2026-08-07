@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">GuardianShield Filho</string>
+    <string name="title_activity_main">GuardianShield Filho</string>
+    <string name="package_name">com.guardianshield.child</string>
+    <string name="custom_url_scheme">com.guardianshield.child</string>
+</resources>

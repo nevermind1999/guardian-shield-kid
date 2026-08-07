@@ -1,0 +1,9 @@
+{
+  "appId": "com.guardianshield.child",
+  "appName": "GuardianShield Filho",
+  "webDir": "dist",
+  "server": {
+    "cleartext": true,
+    "allowNavigation": ["*"]
+  }
+}
