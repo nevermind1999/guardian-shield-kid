@@ -14,10 +14,25 @@ const SERVER_URLS = [
   'http://10.0.2.2:3001'
 ].filter(Boolean);
 
+const DEFAULT_INITIAL_STATE = {
+  pairedDevices: {},
+  deviceInfo: { name: 'Celular da Criança', model: 'Android' },
+  screenTime: { dailyLimitMinutes: 120, usedMinutesToday: 0, isPauseAllActive: false },
+  blockedApps: [
+    { id: 'com.whatsapp', name: 'WhatsApp', isBlocked: false },
+    { id: 'com.zhiliaoapp.musically', name: 'TikTok', isBlocked: false },
+    { id: 'com.instagram.android', name: 'Instagram', isBlocked: false },
+    { id: 'com.google.android.youtube', name: 'YouTube', isBlocked: false },
+    { id: 'com.dts.freefireth', name: 'Free Fire', isBlocked: true }
+  ],
+  rules: { dailyLimitMinutes: 120, isPauseAllActive: false, blockedApps: [] },
+  location: { latitude: -23.550520, longitude: -46.633308 }
+};
+
 export default function App() {
   const [socket, setSocket] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
-  const [state, setState] = useState(null);
+  const [state, setState] = useState(DEFAULT_INITIAL_STATE);
   const [isPaired, setIsPaired] = useState(false);
   const [pairingCodeInput, setPairingCodeInput] = useState('');
   const [pairingError, setPairingError] = useState('');
@@ -260,10 +275,11 @@ export default function App() {
     );
   }
 
-  const { deviceInfo, screenTime, blockedApps } = state;
-  const remainingMinutes = Math.max(0, screenTime.dailyLimitMinutes - screenTime.usedMinutesToday);
+  const screenTime = state?.screenTime || { dailyLimitMinutes: 120, usedMinutesToday: 0, isPauseAllActive: false };
+  const blockedApps = state?.blockedApps || [];
+  const remainingMinutes = Math.max(0, (screenTime.dailyLimitMinutes || 120) - (screenTime.usedMinutesToday || 0));
   const isTimeExpired = remainingMinutes <= 0;
-  const isBlockedOverall = screenTime.isPauseAllActive || isTimeExpired;
+  const isBlockedOverall = Boolean(screenTime.isPauseAllActive || isTimeExpired);
 
   const handleSendTimeRequest = (e) => {
     e.preventDefault();
