@@ -63,9 +63,12 @@ export default function App() {
     };
   }, [showRequestModal, simulatedBlockedApp]);
 
-  const handleOpenDownload = (url) => {
-    // Download direto do APK sem navegar para o GitHub
-    window.location.href = url;
+  const handleOpenDownload = async (url) => {
+    try {
+      await Browser.open({ url });
+    } catch (e) {
+      window.open(url, '_system');
+    }
   };
 
   // DETECÇÃO DINÂMICA REAL DO APARELHO (Samsung A06, etc.) E REDE WI-FI
