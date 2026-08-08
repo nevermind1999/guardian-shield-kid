@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
+import { Capacitor } from '@capacitor/core';
 import { Device } from '@capacitor/device';
 import { Network } from '@capacitor/network';
 import { Browser } from '@capacitor/browser';
@@ -71,6 +72,17 @@ export default function App() {
       window.location.href = url;
     }
   };
+
+  // Sincronização nativa do estado de Pausa Geral / Bloqueio Total com o Android
+  useEffect(() => {
+    const isPaused = state?.screenTime?.isPauseAllActive || false;
+    const isExpired = (state?.screenTime?.usedMinutesToday || 0) >= (state?.screenTime?.dailyLimitMinutes || 120);
+    const isBlockedOverall = isPaused || isExpired;
+
+    if (Capacitor.isNativePlatform() && Capacitor.Plugins?.PauseModule) {
+      Capacitor.Plugins.PauseModule.setPauseState({ active: isBlockedOverall });
+    }
+  }, [state?.screenTime]);
 
   // DETECÇÃO DINÂMICA REAL DO APARELHO (Samsung A06, etc.) E REDE WI-FI
   const [deviceDetails, setDeviceDetails] = useState({
