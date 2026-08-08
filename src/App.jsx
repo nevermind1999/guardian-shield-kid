@@ -44,6 +44,8 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState(null);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [simulatedBlockedApp, setSimulatedBlockedApp] = useState(null);
+  // null = ainda não verificado / plataforma web; true/false = status real do Accessibility Service nativo
+  const [accessibilityEnabled, setAccessibilityEnabled] = useState(null);
 
   // Tratamento nativo do botão Voltar do Android (não fecha o app ao voltar)
   useEffect(() => {
@@ -63,6 +65,33 @@ export default function App() {
       document.removeEventListener('backButton', handleBack);
     };
   }, [showRequestModal, simulatedBlockedApp]);
+
+  // Verifica se o serviço de Acessibilidade (necessário para bloquear apps de fato) está habilitado.
+  // Como habilitar é um passo manual do usuário em Configurações do Android, revalidamos sempre
+  // que o app volta ao primeiro plano (ex: usuário voltando das Configurações).
+  const checkAccessibility = () => {
+    if (Capacitor.isNativePlatform() && Capacitor.Plugins?.PauseModule?.checkAccessibilityStatus) {
+      Capacitor.Plugins.PauseModule.checkAccessibilityStatus()
+        .then(res => setAccessibilityEnabled(Boolean(res?.enabled)))
+        .catch(() => setAccessibilityEnabled(null));
+    }
+  };
+
+  useEffect(() => {
+    checkAccessibility();
+    const resumeListener = CapApp.addListener('appStateChange', ({ isActive }) => {
+      if (isActive) checkAccessibility();
+    });
+    return () => {
+      resumeListener.then(l => l.remove());
+    };
+  }, []);
+
+  const handleOpenAccessibilitySettings = () => {
+    if (Capacitor.isNativePlatform() && Capacitor.Plugins?.PauseModule?.openAccessibilitySettings) {
+      Capacitor.Plugins.PauseModule.openAccessibilitySettings();
+    }
+  };
 
   const handleOpenDownload = (url) => {
     console.log('Iniciando download do APK:', url);
@@ -407,6 +436,32 @@ export default function App() {
           <Wifi size={12} /> Sincronizado
         </span>
       </header>
+
+      {/* AVISO: PROTEÇÃO DE BLOQUEIO DESATIVADA (Accessibility Service não habilitado) */}
+      {accessibilityEnabled === false && (
+        <div style={{
+          padding: '16px 20px', borderRadius: '16px',
+          background: 'rgba(244, 63, 94, 0.12)', border: '1px solid var(--accent-rose)',
+          display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px'
+        }}>
+          <div>
+            <h4 style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--accent-rose)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <AlertTriangle size={18} /> Proteção desativada
+            </h4>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+              O bloqueio de apps não vai funcionar até você ativar o Serviço de Acessibilidade do GuardianShield.
+              Se a opção estiver bloqueada, vá em Configurações do app → "Permitir configurações restritas" primeiro.
+            </p>
+          </div>
+          <button
+            onClick={handleOpenAccessibilitySettings}
+            className="btn btn-primary"
+            style={{ whiteSpace: 'nowrap' }}
+          >
+            <Shield size={16} /> Ativar agora
+          </button>
+        </div>
+      )}
 
       {/* BANNER DE ATUALIZAÇÃO DO GITHUB */}
       {updateInfo && (

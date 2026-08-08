@@ -7,6 +7,8 @@ import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.os.Build;
 import android.os.IBinder;
+import android.provider.Settings;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
@@ -45,6 +47,11 @@ public class LockOverlayService extends Service {
             if (isShowing && overlayView != null) {
                 if (titleView != null) titleView.setText(titleText);
                 if (subtitleView != null) subtitleView.setText(subtitleText);
+                return;
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+                Log.e("GuardianShield", "Não é possível exibir o bloqueio: permissão SYSTEM_ALERT_WINDOW não concedida.");
                 return;
             }
 

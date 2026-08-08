@@ -1,5 +1,6 @@
 package com.guardianshield.child;
 
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -9,11 +10,13 @@ import android.os.Bundle;
 import android.provider.Settings;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.JSArray;
+import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.guardianshield.child.services.LockOverlayService;
+import com.guardianshield.child.services.ParentalAccessibilityService;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -40,6 +43,23 @@ public class MainActivity extends BridgeActivity {
                 }
             });
         }
+    }
+
+    /**
+     * Verifica se o ParentalAccessibilityService está de fato habilitado pelo usuário
+     * em Configurações > Acessibilidade (passo manual que o app não pode ativar sozinho).
+     */
+    public static boolean isAccessibilityServiceEnabled(Context context) {
+        String expectedComponent = context.getPackageName() + "/" + ParentalAccessibilityService.class.getName();
+        ContentResolver resolver = context.getContentResolver();
+        String enabledServices = Settings.Secure.getString(resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+        if (enabledServices == null) return false;
+        for (String component : enabledServices.split(":")) {
+            if (component.equalsIgnoreCase(expectedComponent)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void updateLockState(boolean active) {
@@ -130,6 +150,22 @@ public class MainActivity extends BridgeActivity {
             }
             SharedPreferences prefs = getContext().getSharedPreferences("GuardianShieldPrefs", Context.MODE_PRIVATE);
             prefs.edit().putStringSet("blockedPackagesSet", set).apply();
+            call.resolve();
+        }
+
+        @PluginMethod
+        public void checkAccessibilityStatus(PluginCall call) {
+            boolean enabled = MainActivity.isAccessibilityServiceEnabled(getContext());
+            JSObject result = new JSObject();
+            result.put("enabled", enabled);
+            call.resolve(result);
+        }
+
+        @PluginMethod
+        public void openAccessibilitySettings(PluginCall call) {
+            Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(intent);
             call.resolve();
         }
     }

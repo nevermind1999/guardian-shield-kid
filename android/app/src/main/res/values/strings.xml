@@ -4,4 +4,5 @@
     <string name="title_activity_main">GuardianShield Filho</string>
     <string name="package_name">com.guardianshield.child</string>
     <string name="custom_url_scheme">com.guardianshield.child</string>
+    <string name="accessibility_service_description">Permite que o GuardianShield detecte quando um aplicativo bloqueado pelos pais é aberto e exiba a tela de bloqueio.</string>
 </resources>
