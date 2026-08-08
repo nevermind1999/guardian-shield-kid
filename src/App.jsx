@@ -44,18 +44,22 @@ export default function App() {
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [simulatedBlockedApp, setSimulatedBlockedApp] = useState(null);
 
-  // Tratamento nativo do botão Voltar do Android
+  // Tratamento nativo do botão Voltar do Android (não fecha o app ao voltar)
   useEffect(() => {
-    const backListener = CapApp.addListener('backButton', () => {
+    const handleBack = () => {
       if (showRequestModal) {
         setShowRequestModal(false);
       } else if (simulatedBlockedApp) {
         setSimulatedBlockedApp(null);
       }
-    });
+    };
+
+    const backListener = CapApp.addListener('backButton', handleBack);
+    document.addEventListener('backButton', handleBack);
 
     return () => {
       backListener.then(l => l.remove());
+      document.removeEventListener('backButton', handleBack);
     };
   }, [showRequestModal, simulatedBlockedApp]);
 
