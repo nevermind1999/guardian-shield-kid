@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
-import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaPlayer
@@ -40,11 +39,11 @@ import androidx.recyclerview.widget.RecyclerView
 import com.guardianshield.child.model.AppEntry
 import com.guardianshield.child.util.AppRepository
 import com.guardianshield.child.util.GuardianPrefs
+import com.guardianshield.child.util.VideoTransform
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.max
 
 /**
  * Tela inicial (Home) nativa do GuardianShield: relógio, papel de parede real do aparelho
@@ -78,6 +77,14 @@ class LauncherHomeActivity : AppCompatActivity() {
 
     // --- Vídeo de fundo: só existe enquanto a Home está em primeiro plano ---
     private var mediaPlayer: MediaPlayer? = null
+
+    // Depois de escolher o arquivo, abre a simulação de recorte (zoom/posição) antes de
+    // aplicar de verdade — só grava em GuardianPrefs quando o usuário toca em "Salvar" lá.
+    private val cropVideoLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) {
+            setupVideoWallpaper()
+        }
+    }
     private val pickVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             try {
@@ -86,8 +93,9 @@ class LauncherHomeActivity : AppCompatActivity() {
                 // Alguns provedores não suportam permissão persistente; segue mesmo assim,
                 // pode parar de funcionar após reiniciar o app nesse caso raro.
             }
-            GuardianPrefs.setVideoWallpaperUri(this, uri.toString())
-            setupVideoWallpaper()
+            cropVideoLauncher.launch(
+                Intent(this, VideoCropActivity::class.java).putExtra(VideoCropActivity.EXTRA_VIDEO_URI, uri.toString())
+            )
         }
     }
 
@@ -438,22 +446,22 @@ class LauncherHomeActivity : AppCompatActivity() {
         }
     }
 
-    /** Ajusta a matriz do TextureView pra cobrir a tela sem distorcer (igual a centerCrop). */
+    /**
+     * Aplica o enquadramento (zoom/posição) que o usuário escolheu na simulação de recorte
+     * — a mesma conta de VideoTransform usada lá, então o resultado final na Home é
+     * exatamente o que foi visto e confirmado na prévia.
+     */
     private fun fitVideoTransform(videoWidth: Int, videoHeight: Int) {
         if (videoWidth <= 0 || videoHeight <= 0) return
         videoWallpaper.post {
-            val viewWidth = videoWallpaper.width.toFloat()
-            val viewHeight = videoWallpaper.height.toFloat()
-            if (viewWidth <= 0f || viewHeight <= 0f) return@post
-
-            val scale = max(viewWidth / videoWidth, viewHeight / videoHeight)
-            val scaledWidth = videoWidth * scale
-            val scaledHeight = videoHeight * scale
-
-            val matrix = Matrix()
-            matrix.setScale(scale, scale)
-            matrix.postTranslate((viewWidth - scaledWidth) / 2f, (viewHeight - scaledHeight) / 2f)
-            videoWallpaper.setTransform(matrix)
+            VideoTransform.apply(
+                videoWallpaper,
+                videoWidth,
+                videoHeight,
+                GuardianPrefs.videoCropScale(this),
+                GuardianPrefs.videoCropPanX(this),
+                GuardianPrefs.videoCropPanY(this)
+            )
         }
     }
 
@@ -529,6 +537,19 @@ class LauncherHomeActivity : AppCompatActivity() {
             GuardianPrefs.setVideoWallpaperUri(this, null)
             setupVideoWallpaper()
             dialog.dismiss()
+        }
+        // "Ajustar enquadramento" só faz sentido se já existe um vídeo escolhido — reabre
+        // a mesma simulação de recorte, começando do zoom/posição já salvos.
+        val adjustFramingButton = view.findViewById<Button>(R.id.adjustVideoFramingButton)
+        val currentVideoUri = GuardianPrefs.videoWallpaperUri(this)
+        if (currentVideoUri != null) {
+            adjustFramingButton.visibility = View.VISIBLE
+            adjustFramingButton.setOnClickListener {
+                cropVideoLauncher.launch(
+                    Intent(this, VideoCropActivity::class.java).putExtra(VideoCropActivity.EXTRA_VIDEO_URI, currentVideoUri)
+                )
+                dialog.dismiss()
+            }
         }
 
         view.findViewById<Button>(R.id.closeDialogButton).setOnClickListener { dialog.dismiss() }

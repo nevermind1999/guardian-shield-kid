@@ -61,6 +61,14 @@
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation"
             android:exported="false" />
 
+        <!-- Simulação de recorte do vídeo de fundo: mostra o vídeo tocando de verdade e
+             deixa o usuário belisco/arrastar pra escolher zoom e posição antes de aplicar -->
+        <activity
+            android:name=".VideoCropActivity"
+            android:theme="@style/AppTheme.NoActionBar"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

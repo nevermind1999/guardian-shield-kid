@@ -1,6 +1,7 @@
 package com.guardianshield.child
 
 import android.content.SharedPreferences
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
@@ -9,6 +10,7 @@ import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.graphics.ColorUtils
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -21,15 +23,23 @@ import com.guardianshield.child.util.GuardianPrefs
 /**
  * Gaveta de apps nativa: todos os apps do aparelho, com busca. Mesmo estilo de bloqueio
  * (cinza, apagado, sem click) usado no dock da Home — refeito ao vivo se os pais mudarem
- * a lista de bloqueio enquanto essa tela estiver aberta.
+ * a lista de bloqueio enquanto essa tela estiver aberta. O fundo usa a mesma cor de tema
+ * escolhida em "Personalizar tela inicial", como um brilho suave vindo de cima.
  */
 class LauncherDrawerActivity : AppCompatActivity() {
 
     private lateinit var prefs: SharedPreferences
     private lateinit var adapter: AppGridAdapter
+    private lateinit var root: LinearLayout
 
-    private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
-        runOnUiThread { refreshBlockedState() }
+    private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        runOnUiThread {
+            if (key == "themeColorStart" || key == "themeColorEnd") {
+                applyThemeBackground()
+            } else {
+                refreshBlockedState()
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -37,7 +47,9 @@ class LauncherDrawerActivity : AppCompatActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContentView(R.layout.activity_launcher_drawer)
 
-        val root = findViewById<LinearLayout>(R.id.drawerRoot)
+        root = findViewById(R.id.drawerRoot)
+        applyThemeBackground()
+
         val basePadding = (16 * resources.displayMetrics.density).toInt()
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -79,6 +91,7 @@ class LauncherDrawerActivity : AppCompatActivity() {
         super.onResume()
         prefs.registerOnSharedPreferenceChangeListener(prefsListener)
         refreshBlockedState()
+        applyThemeBackground()
     }
 
     override fun onPause() {
@@ -88,5 +101,18 @@ class LauncherDrawerActivity : AppCompatActivity() {
 
     private fun refreshBlockedState() {
         adapter.updateBlockedState(GuardianPrefs.blockedPackages(this), GuardianPrefs.isPauseAllActive(this))
+    }
+
+    /** Mesmo fundo escuro de sempre, com um brilho radial sutil na cor de tema — igual ao
+     * degradê do painel de configurações (React), pra Home e Gaveta combinarem. */
+    private fun applyThemeBackground() {
+        val (start, _) = GuardianPrefs.themeColors(this)
+        val tinted = ColorUtils.setAlphaComponent(start, 90)
+        val gradient = GradientDrawable()
+        gradient.gradientType = GradientDrawable.RADIAL_GRADIENT
+        gradient.gradientRadius = resources.displayMetrics.widthPixels.toFloat() * 1.1f
+        gradient.setGradientCenter(0.5f, 0f)
+        gradient.colors = intArrayOf(tinted, 0xFF0B132B.toInt())
+        root.background = gradient
     }
 }

@@ -133,6 +133,39 @@ object GuardianPrefs {
         of(context).getString(KEY_VIDEO_WALLPAPER_URI, null)
 
     fun setVideoWallpaperUri(context: Context, uri: String?) {
-        of(context).edit().putString(KEY_VIDEO_WALLPAPER_URI, uri).apply()
+        val editor = of(context).edit().putString(KEY_VIDEO_WALLPAPER_URI, uri)
+        if (uri == null) {
+            // Sem vídeo, não faz sentido guardar um enquadramento — volta pro padrão
+            // pra não "herdar" um recorte estranho caso outro vídeo seja escolhido depois.
+            editor.remove(KEY_VIDEO_CROP_SCALE).remove(KEY_VIDEO_CROP_PAN_X).remove(KEY_VIDEO_CROP_PAN_Y)
+        }
+        editor.apply()
     }
+
+    // --- Enquadramento (zoom/posição) do vídeo de fundo, escolhido na simulação de recorte ---
+    // scale: 1.0 = cobre a tela sem zoom extra (padrão); até MAX_VIDEO_CROP_SCALE de zoom.
+    // panX/panY: 0..1, fração de quanto o enquadramento está deslocado dentro da folga que
+    // sobra depois do zoom (0.5 = centralizado, que é o comportamento de antes).
+    const val MAX_VIDEO_CROP_SCALE = 4f
+
+    fun videoCropScale(context: Context): Float =
+        of(context).getFloat(KEY_VIDEO_CROP_SCALE, 1f)
+
+    fun videoCropPanX(context: Context): Float =
+        of(context).getFloat(KEY_VIDEO_CROP_PAN_X, 0.5f)
+
+    fun videoCropPanY(context: Context): Float =
+        of(context).getFloat(KEY_VIDEO_CROP_PAN_Y, 0.5f)
+
+    fun setVideoCrop(context: Context, scale: Float, panX: Float, panY: Float) {
+        of(context).edit()
+            .putFloat(KEY_VIDEO_CROP_SCALE, scale.coerceIn(1f, MAX_VIDEO_CROP_SCALE))
+            .putFloat(KEY_VIDEO_CROP_PAN_X, panX.coerceIn(0f, 1f))
+            .putFloat(KEY_VIDEO_CROP_PAN_Y, panY.coerceIn(0f, 1f))
+            .apply()
+    }
+
+    private const val KEY_VIDEO_CROP_SCALE = "homeVideoCropScale"
+    private const val KEY_VIDEO_CROP_PAN_X = "homeVideoCropPanX"
+    private const val KEY_VIDEO_CROP_PAN_Y = "homeVideoCropPanY"
 }

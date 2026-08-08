@@ -95,6 +95,18 @@
         </LinearLayout>
 
         <Button
+            android:id="@+id/adjustVideoFramingButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Ajustar enquadramento"
+            android:textAllCaps="false"
+            android:textSize="13sp"
+            android:textColor="#FFFFFF"
+            android:background="@drawable/bg_app_icon"
+            android:visibility="gone" />
+
+        <Button
             android:id="@+id/closeDialogButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
