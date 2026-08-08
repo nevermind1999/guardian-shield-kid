@@ -7,8 +7,9 @@ import { Browser } from '@capacitor/browser';
 import { App as CapApp } from '@capacitor/app';
 import { checkForAppUpdates } from './services/updater';
 import {
-  Clock, Shield, Lock, AlertTriangle, CheckCircle, 
-  Send, Smartphone, Heart, Sparkles, X, MapPin, Wifi, QrCode, Key, Download
+  Clock, Shield, Lock, AlertTriangle, CheckCircle,
+  Send, Smartphone, X, QrCode, Key, Download,
+  LayoutGrid, Search, ArrowLeft, BatteryMedium
 } from 'lucide-react';
 
 const SERVER_URLS = [
@@ -49,12 +50,24 @@ export default function App() {
   const [installedRealApps, setInstalledRealApps] = useState(null);
   // null = ainda não verificado; true/false = se o GuardianShield é a tela inicial padrão do Android
   const [isDefaultLauncher, setIsDefaultLauncher] = useState(null);
+  // Tela inicial (home) x gaveta de apps (drawer), igual a um launcher de verdade
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerSearch, setDrawerSearch] = useState('');
+  const [now, setNow] = useState(new Date());
+
+  // Relógio da tela inicial
+  useEffect(() => {
+    const tick = setInterval(() => setNow(new Date()), 10000);
+    return () => clearInterval(tick);
+  }, []);
 
   // Tratamento nativo do botão Voltar do Android (não fecha o app ao voltar)
   useEffect(() => {
     const handleBack = () => {
       if (showRequestModal) {
         setShowRequestModal(false);
+      } else if (drawerOpen) {
+        setDrawerOpen(false);
       }
     };
 
@@ -65,7 +78,7 @@ export default function App() {
       backListener.then(l => l.remove());
       document.removeEventListener('backButton', handleBack);
     };
-  }, [showRequestModal]);
+  }, [showRequestModal, drawerOpen]);
 
   // Verifica se o serviço de Acessibilidade (necessário para bloquear apps de fato) está habilitado.
   // Como habilitar é um passo manual do usuário em Configurações do Android, revalidamos sempre
@@ -418,6 +431,61 @@ export default function App() {
     }
   };
 
+  // Ícone de app reutilizado tanto no dock da tela inicial quanto na gaveta de apps —
+  // apps bloqueados ficam em escala de cinza, apagados e SEM handler de clique.
+  const renderAppIcon = (app, { small = false } = {}) => {
+    const blocked = isAppBlocked(app);
+    const size = small ? 48 : 58;
+    return (
+      <button
+        key={app.package || app.id}
+        onClick={() => handleTryLaunchApp(app)}
+        disabled={blocked}
+        title={blocked ? `${app.name} está bloqueado pelos seus pais` : app.name}
+        style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px',
+          background: 'transparent', border: 'none', padding: '4px', width: '76px',
+          cursor: blocked ? 'default' : 'pointer',
+          opacity: blocked ? 0.35 : 1,
+          pointerEvents: blocked ? 'none' : 'auto'
+        }}
+      >
+        <div style={{
+          width: `${size}px`, height: `${size}px`, borderRadius: '16px', overflow: 'hidden',
+          background: 'rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          filter: blocked ? 'grayscale(1)' : 'none', position: 'relative',
+          boxShadow: '0 4px 14px rgba(0,0,0,0.3)'
+        }}>
+          {app.icon
+            ? <img src={app.icon} alt={app.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            : <Smartphone size={size * 0.4} style={{ color: 'var(--accent-cyan)' }} />}
+          {blocked && (
+            <div style={{ position: 'absolute', inset: 0, background: 'rgba(10,13,20,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Lock size={size * 0.35} style={{ color: 'white' }} />
+            </div>
+          )}
+        </div>
+        <span style={{
+          fontSize: '0.7rem', fontWeight: 600, textAlign: 'center', color: 'white', lineHeight: 1.2,
+          maxWidth: '76px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
+        }}>
+          {app.name}
+        </span>
+      </button>
+    );
+  };
+
+  // Dock da tela inicial: até 4 apps liberados em destaque (os primeiros não bloqueados)
+  const favoriteApps = appsForGrid.filter(app => !isAppBlocked(app)).slice(0, 4);
+
+  // Apps da gaveta, em ordem alfabética e filtrados pela busca — como um launcher de verdade
+  const drawerApps = [...appsForGrid]
+    .filter(app => app.name.toLowerCase().includes(drawerSearch.trim().toLowerCase()))
+    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+
+  const timeStr = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  const dateStr = now.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' });
+
   return (
     <div style={{ maxWidth: '480px', margin: '0 auto', padding: '20px 16px', minHeight: '100vh', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       
@@ -447,210 +515,194 @@ export default function App() {
         </div>
       )}
 
-      {/* HEADER */}
-      <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div>
-          <h1 style={{ fontSize: '1.3rem', fontWeight: 800 }}>Dispositivo Conectado</h1>
-          <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Bateria Real: {realBattery}%</p>
-        </div>
-        <span style={{ fontSize: '0.75rem', padding: '6px 12px', borderRadius: '20px', background: 'rgba(6, 214, 160, 0.15)', color: 'var(--accent-emerald)', border: '1px solid rgba(6, 214, 160, 0.3)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <Wifi size={12} /> Sincronizado
-        </span>
-      </header>
-
-      {/* AVISO: PROTEÇÃO DE BLOQUEIO DESATIVADA (Accessibility Service não habilitado) */}
-      {accessibilityEnabled === false && (
+      {drawerOpen ? (
+        /* ================= GAVETA DE APPS (todos os apps, com busca) ================= */
         <div style={{
-          padding: '16px 20px', borderRadius: '16px',
-          background: 'rgba(244, 63, 94, 0.12)', border: '1px solid var(--accent-rose)',
-          display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px'
+          position: 'fixed', inset: 0, zIndex: 500, background: 'var(--bg-primary)',
+          backgroundImage: 'radial-gradient(circle at 50% 0%, rgba(58, 134, 255, 0.12), transparent 60%)',
+          display: 'flex', flexDirection: 'column', padding: '20px 16px'
         }}>
-          <div>
-            <h4 style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--accent-rose)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <AlertTriangle size={18} /> Proteção desativada
-            </h4>
-            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-              O bloqueio de apps não vai funcionar até você ativar o Serviço de Acessibilidade do GuardianShield.
-              Se a opção estiver bloqueada, vá em Configurações do app → "Permitir configurações restritas" primeiro.
-            </p>
-          </div>
-          <button
-            onClick={handleOpenAccessibilitySettings}
-            className="btn btn-primary"
-            style={{ whiteSpace: 'nowrap' }}
-          >
-            <Shield size={16} /> Ativar agora
-          </button>
-        </div>
-      )}
-
-      {/* AVISO: GUARDIANSHIELD NÃO É A TELA INICIAL PADRÃO */}
-      {isDefaultLauncher === false && (
-        <div style={{
-          padding: '16px 20px', borderRadius: '16px',
-          background: 'rgba(255, 190, 11, 0.12)', border: '1px solid #ffbe0b',
-          display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px'
-        }}>
-          <div>
-            <h4 style={{ fontSize: '0.95rem', fontWeight: 800, color: '#ffbe0b', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Smartphone size={18} /> Defina como tela inicial
-            </h4>
-            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-              Para os ícones bloqueados ficarem apagados na tela inicial, defina o GuardianShield como o
-              app padrão de Início (Home) do aparelho.
-            </p>
-          </div>
-          <button
-            onClick={handleOpenHomeSettings}
-            className="btn btn-primary"
-            style={{ whiteSpace: 'nowrap', background: '#ffbe0b', borderColor: '#ffbe0b', color: '#0f172a' }}
-          >
-            Definir agora
-          </button>
-        </div>
-      )}
-
-      {/* BANNER DE ATUALIZAÇÃO DO GITHUB */}
-      {updateInfo && (
-        <div style={{
-          padding: '16px 20px', borderRadius: '16px',
-          background: 'linear-gradient(135deg, var(--accent-cyan), #8338ec)',
-          color: 'white', display: 'flex', flexWrap: 'wrap', alignItems: 'center',
-          justifyContent: 'space-between', gap: '12px', boxShadow: '0 8px 24px rgba(58, 134, 255, 0.3)'
-        }}>
-          <div>
-            <h4 style={{ fontSize: '0.95rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Download size={18} /> Nova versão {updateInfo.latestVersion} disponível!
-            </h4>
-            <p style={{ fontSize: '0.8rem', opacity: 0.9, marginTop: '2px' }}>{updateInfo.releaseNotes}</p>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <button 
-              onClick={() => {
-                handleOpenDownload(updateInfo.downloadUrl);
-                if (updateInfo.latestSha) localStorage.setItem('dismissed_update_sha', updateInfo.latestSha);
-                setUpdateInfo(null);
-              }} 
-              className="btn" 
-              style={{ background: 'white', color: '#0f172a', fontWeight: 800, padding: '8px 14px', fontSize: '0.85rem', cursor: 'pointer' }}
-            >
-              Atualizar APK
-            </button>
-            <button 
-              onClick={() => {
-                if (updateInfo.latestSha) localStorage.setItem('dismissed_update_sha', updateInfo.latestSha);
-                setUpdateInfo(null);
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '18px' }}>
+            <button
+              onClick={() => setDrawerOpen(false)}
+              style={{
+                background: 'rgba(255,255,255,0.06)', border: 'none', borderRadius: '12px',
+                width: '40px', height: '40px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: 'white', cursor: 'pointer', flexShrink: 0
               }}
-              style={{ background: 'transparent', border: 'none', color: 'white', cursor: 'pointer', padding: '4px' }}
-              title="Dispensar aviso"
             >
-              <X size={18} />
+              <ArrowLeft size={20} />
             </button>
+            <div style={{
+              flex: 1, display: 'flex', alignItems: 'center', gap: '8px',
+              background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border-color)',
+              borderRadius: '12px', padding: '10px 14px'
+            }}>
+              <Search size={16} style={{ color: 'var(--text-secondary)' }} />
+              <input
+                type="text"
+                placeholder="Buscar aplicativo"
+                value={drawerSearch}
+                onChange={(e) => setDrawerSearch(e.target.value)}
+                autoFocus
+                style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'white', fontSize: '0.9rem' }}
+              />
+            </div>
+          </div>
+
+          <div style={{
+            flex: 1, overflowY: 'auto',
+            display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(76px, 1fr))',
+            gap: '18px', paddingBottom: '20px', alignContent: 'start'
+          }}>
+            {drawerApps.map(app => renderAppIcon(app))}
+            {drawerApps.length === 0 && (
+              <p style={{ gridColumn: '1 / -1', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '20px' }}>
+                Nenhum aplicativo encontrado.
+              </p>
+            )}
           </div>
         </div>
-      )}
-
-      {/* NOTIFICAÇÃO DE PEDIDO ENVIADO */}
-      {requestSentNotice && (
-        <div style={{ padding: '14px', borderRadius: '12px', background: 'rgba(6, 214, 160, 0.15)', border: '1px solid var(--accent-emerald)', color: 'var(--accent-emerald)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <CheckCircle size={18} /> Solicitação enviada com sucesso! Aguarde a resposta dos seus pais.
-        </div>
-      )}
-
-      {/* COUNTER DE TEMPO DE TELA */}
-      <div className="glass-panel" style={{ padding: '24px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
-        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '1px', fontWeight: 700 }}>
-          Tempo Restante Hoje
-        </span>
-        <div style={{ fontSize: '2.5rem', fontWeight: 800, color: 'var(--accent-cyan)', margin: '8px 0' }}>
-          {Math.floor(remainingMinutes / 60)}h {remainingMinutes % 60}m
-        </div>
-
-        <div style={{ height: '8px', background: 'rgba(255,255,255,0.1)', borderRadius: '4px', overflow: 'hidden', margin: '16px 0' }}>
-          <div style={{ 
-            height: '100%', width: `${(remainingMinutes / screenTime.dailyLimitMinutes) * 100}%`,
-            background: 'linear-gradient(90deg, #3a86ff, #06d6a0)', borderRadius: '4px'
-          }} />
-        </div>
-
-        <button className="btn btn-primary" onClick={() => setShowRequestModal(true)} style={{ width: '100%', marginTop: '8px' }}>
-          <Send size={16} /> Solicitar Tempo Extra
-        </button>
-      </div>
-
-      {/* SEÇÃO DE APLICATIVOS INSTALADOS (tela inicial / Launcher) */}
-      <div className="glass-panel" style={{ padding: '20px' }}>
-        <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <Smartphone size={18} style={{ color: 'var(--accent-cyan)' }} /> {isUsingRealApps ? 'Meus Aplicativos' : 'Aplicativos Sincronizados'}
-        </h3>
-
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: isUsingRealApps ? 'repeat(auto-fill, minmax(72px, 1fr))' : 'repeat(2, 1fr)',
-          gap: isUsingRealApps ? '16px' : '10px'
-        }}>
-          {appsForGrid.map(app => {
-            const blocked = isAppBlocked(app);
-
-            if (isUsingRealApps) {
-              return (
-                <button
-                  key={app.package}
-                  onClick={() => handleTryLaunchApp(app)}
-                  disabled={blocked}
-                  title={blocked ? `${app.name} está bloqueado pelos seus pais` : app.name}
-                  style={{
-                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px',
-                    background: 'transparent', border: 'none', padding: '4px',
-                    cursor: blocked ? 'default' : 'pointer',
-                    opacity: blocked ? 0.35 : 1,
-                    pointerEvents: blocked ? 'none' : 'auto'
-                  }}
-                >
-                  <div style={{
-                    width: '52px', height: '52px', borderRadius: '14px', overflow: 'hidden',
-                    background: 'rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    filter: blocked ? 'grayscale(1)' : 'none', position: 'relative'
-                  }}>
-                    {app.icon
-                      ? <img src={app.icon} alt={app.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                      : <Smartphone size={22} style={{ color: 'var(--accent-cyan)' }} />}
-                    {blocked && (
-                      <div style={{ position: 'absolute', inset: 0, background: 'rgba(10,13,20,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        <Lock size={18} style={{ color: 'white' }} />
-                      </div>
-                    )}
-                  </div>
-                  <span style={{ fontSize: '0.7rem', fontWeight: 600, textAlign: 'center', color: 'white', lineHeight: 1.2 }}>
-                    {app.name}
-                  </span>
-                </button>
-              );
-            }
-
-            return (
+      ) : (
+        /* ================= TELA INICIAL (HOME) ================= */
+        <>
+          {/* AVISO: PROTEÇÃO DE BLOQUEIO DESATIVADA (Accessibility Service não habilitado) */}
+          {accessibilityEnabled === false && (
+            <div style={{
+              padding: '16px 20px', borderRadius: '16px',
+              background: 'rgba(244, 63, 94, 0.12)', border: '1px solid var(--accent-rose)',
+              display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px'
+            }}>
+              <div>
+                <h4 style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--accent-rose)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <AlertTriangle size={18} /> Proteção desativada
+                </h4>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                  O bloqueio de apps não vai funcionar até você ativar o Serviço de Acessibilidade do GuardianShield.
+                  Se a opção estiver bloqueada, vá em Configurações do app → "Permitir configurações restritas" primeiro.
+                </p>
+              </div>
               <button
-                key={app.id}
-                onClick={() => handleTryLaunchApp(app)}
-                disabled={blocked}
-                style={{
-                  padding: '14px', borderRadius: '12px',
-                  background: blocked ? 'rgba(244, 63, 94, 0.1)' : 'rgba(255, 255, 255, 0.04)',
-                  border: `1px solid ${blocked ? 'rgba(244, 63, 94, 0.3)' : 'var(--border-color)'}`,
-                  color: 'white', display: 'flex', alignItems: 'center', gap: '10px',
-                  cursor: blocked ? 'default' : 'pointer', textAlign: 'left',
-                  opacity: blocked ? 0.6 : 1
-                }}
+                onClick={handleOpenAccessibilitySettings}
+                className="btn btn-primary"
+                style={{ whiteSpace: 'nowrap' }}
               >
-                <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: blocked ? 'rgba(244, 63, 94, 0.2)' : 'rgba(58, 134, 255, 0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  {blocked ? <Lock size={16} style={{ color: 'var(--accent-rose)' }} /> : <Smartphone size={16} style={{ color: 'var(--accent-cyan)' }} />}
-                </div>
-                <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>{app.name}</span>
+                <Shield size={16} /> Ativar agora
               </button>
-            );
-          })}
-        </div>
-      </div>
+            </div>
+          )}
+
+          {/* AVISO: GUARDIANSHIELD NÃO É A TELA INICIAL PADRÃO */}
+          {isDefaultLauncher === false && (
+            <div style={{
+              padding: '16px 20px', borderRadius: '16px',
+              background: 'rgba(255, 190, 11, 0.12)', border: '1px solid #ffbe0b',
+              display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px'
+            }}>
+              <div>
+                <h4 style={{ fontSize: '0.95rem', fontWeight: 800, color: '#ffbe0b', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Smartphone size={18} /> Defina como tela inicial
+                </h4>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                  Para os ícones bloqueados ficarem apagados na tela inicial, defina o GuardianShield como o
+                  app padrão de Início (Home) do aparelho.
+                </p>
+              </div>
+              <button
+                onClick={handleOpenHomeSettings}
+                className="btn btn-primary"
+                style={{ whiteSpace: 'nowrap', background: '#ffbe0b', borderColor: '#ffbe0b', color: '#0f172a' }}
+              >
+                Definir agora
+              </button>
+            </div>
+          )}
+
+          {/* BANNER DE ATUALIZAÇÃO DO GITHUB */}
+          {updateInfo && (
+            <div style={{
+              padding: '16px 20px', borderRadius: '16px',
+              background: 'linear-gradient(135deg, var(--accent-cyan), #8338ec)',
+              color: 'white', display: 'flex', flexWrap: 'wrap', alignItems: 'center',
+              justifyContent: 'space-between', gap: '12px', boxShadow: '0 8px 24px rgba(58, 134, 255, 0.3)'
+            }}>
+              <div>
+                <h4 style={{ fontSize: '0.95rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Download size={18} /> Nova versão {updateInfo.latestVersion} disponível!
+                </h4>
+                <p style={{ fontSize: '0.8rem', opacity: 0.9, marginTop: '2px' }}>{updateInfo.releaseNotes}</p>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  onClick={() => {
+                    handleOpenDownload(updateInfo.downloadUrl);
+                    if (updateInfo.latestSha) localStorage.setItem('dismissed_update_sha', updateInfo.latestSha);
+                    setUpdateInfo(null);
+                  }}
+                  className="btn"
+                  style={{ background: 'white', color: '#0f172a', fontWeight: 800, padding: '8px 14px', fontSize: '0.85rem', cursor: 'pointer' }}
+                >
+                  Atualizar APK
+                </button>
+                <button
+                  onClick={() => {
+                    if (updateInfo.latestSha) localStorage.setItem('dismissed_update_sha', updateInfo.latestSha);
+                    setUpdateInfo(null);
+                  }}
+                  style={{ background: 'transparent', border: 'none', color: 'white', cursor: 'pointer', padding: '4px' }}
+                  title="Dispensar aviso"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* NOTIFICAÇÃO DE PEDIDO ENVIADO */}
+          {requestSentNotice && (
+            <div style={{ padding: '14px', borderRadius: '12px', background: 'rgba(6, 214, 160, 0.15)', border: '1px solid var(--accent-emerald)', color: 'var(--accent-emerald)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <CheckCircle size={18} /> Solicitação enviada com sucesso! Aguarde a resposta dos seus pais.
+            </div>
+          )}
+
+          {/* RELÓGIO (tela inicial de verdade) */}
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '4px' }}>
+            <div style={{ fontSize: '3.4rem', fontWeight: 800, letterSpacing: '-1px' }}>{timeStr}</div>
+            <div style={{ fontSize: '0.95rem', color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{dateStr}</div>
+          </div>
+
+          {/* PÍLULA DE STATUS: bateria + tempo restante + pedir tempo extra */}
+          <div className="glass-panel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '14px', padding: '12px 18px', borderRadius: '999px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <BatteryMedium size={16} /> {realBattery}%
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Clock size={16} /> {Math.floor(remainingMinutes / 60)}h {remainingMinutes % 60}m
+              </span>
+            </div>
+            <button onClick={() => setShowRequestModal(true)} className="btn btn-primary" style={{ padding: '8px 14px', fontSize: '0.8rem', whiteSpace: 'nowrap' }}>
+              <Send size={14} /> Tempo extra
+            </button>
+          </div>
+
+          {/* DOCK: favoritos + botão para abrir a gaveta de apps */}
+          <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: '14px', padding: '4px 4px 6px' }}>
+            {favoriteApps.map(app => renderAppIcon(app, { small: true }))}
+            <button
+              onClick={() => setDrawerOpen(true)}
+              title="Ver todos os aplicativos"
+              style={{
+                width: '48px', height: '48px', borderRadius: '16px', border: 'none',
+                background: 'rgba(255,255,255,0.1)', color: 'white',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0
+              }}
+            >
+              <LayoutGrid size={22} />
+            </button>
+          </div>
+        </>
+      )}
 
       {/* MODAL DE PEDIDO DE MAIS TEMPO */}
       {showRequestModal && (
