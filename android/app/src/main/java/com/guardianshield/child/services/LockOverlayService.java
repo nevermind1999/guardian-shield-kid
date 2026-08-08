@@ -16,6 +16,8 @@ import android.widget.TextView;
 public class LockOverlayService extends Service {
     private WindowManager windowManager;
     private View overlayView;
+    private TextView titleView;
+    private TextView subtitleView;
     private static boolean isShowing = false;
 
     @Override
@@ -26,17 +28,26 @@ public class LockOverlayService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && "SHOW_OVERLAY".equals(intent.getAction())) {
-            showOverlay();
+            String title = intent.getStringExtra("title");
+            String message = intent.getStringExtra("message");
+            showOverlay(
+                title != null ? title : "🔒 DISPOSITIVO BLOQUEADO",
+                message != null ? message : "Pausa Geral Ativa ou Tempo Limite Esgotado.\nFale com seus pais para liberar o uso."
+            );
         } else if (intent != null && "HIDE_OVERLAY".equals(intent.getAction())) {
             hideOverlay();
         }
         return START_STICKY;
     }
 
-    private void showOverlay() {
-        if (isShowing) return;
-
+    private void showOverlay(String titleText, String subtitleText) {
         try {
+            if (isShowing && overlayView != null) {
+                if (titleView != null) titleView.setText(titleText);
+                if (subtitleView != null) subtitleView.setText(subtitleText);
+                return;
+            }
+
             windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
 
             LinearLayout layout = new LinearLayout(this);
@@ -44,18 +55,19 @@ public class LockOverlayService extends Service {
             layout.setGravity(Gravity.CENTER);
             layout.setBackgroundColor(Color.parseColor("#0f172a")); // Fundo escuro igual ao tema do app
 
-            TextView titleView = new TextView(this);
-            titleView.setText("🔒 DISPOSITIVO BLOQUEADO");
+            titleView = new TextView(this);
+            titleView.setText(titleText);
             titleView.setTextColor(Color.WHITE);
             titleView.setTextSize(24);
             titleView.setGravity(Gravity.CENTER);
-            titleView.setPadding(0, 0, 0, 20);
+            titleView.setPadding(32, 0, 32, 20);
 
-            TextView subtitleView = new TextView(this);
-            subtitleView.setText("Pausa Geral Ativa ou Tempo Limite Esgotado.\nFale com seus pais para liberar o uso.");
+            subtitleView = new TextView(this);
+            subtitleView.setText(subtitleText);
             subtitleView.setTextColor(Color.parseColor("#94a3b8"));
             subtitleView.setTextSize(16);
             subtitleView.setGravity(Gravity.CENTER);
+            subtitleView.setPadding(32, 0, 32, 0);
 
             layout.addView(titleView);
             layout.addView(subtitleView);
@@ -96,6 +108,8 @@ public class LockOverlayService extends Service {
             e.printStackTrace();
         } finally {
             overlayView = null;
+            titleView = null;
+            subtitleView = null;
             isShowing = false;
         }
     }

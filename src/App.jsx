@@ -84,6 +84,19 @@ export default function App() {
     }
   }, [state?.screenTime]);
 
+  // Sincronização nativa da lista de Apps Bloqueados Individualmente (ex: TikTok, Free Fire) com o Java
+  useEffect(() => {
+    if (state?.blockedApps && Array.isArray(state.blockedApps)) {
+      const blockedPackageIds = state.blockedApps
+        .filter(app => app.isBlocked)
+        .map(app => app.id || app.package || app.name);
+
+      if (Capacitor.isNativePlatform() && Capacitor.Plugins?.PauseModule) {
+        Capacitor.Plugins.PauseModule.setBlockedApps({ packages: blockedPackageIds });
+      }
+    }
+  }, [state?.blockedApps]);
+
   // DETECÇÃO DINÂMICA REAL DO APARELHO (Samsung A06, etc.) E REDE WI-FI
   const [deviceDetails, setDeviceDetails] = useState({
     id: 'child-' + Math.floor(1000 + Math.random() * 9000),

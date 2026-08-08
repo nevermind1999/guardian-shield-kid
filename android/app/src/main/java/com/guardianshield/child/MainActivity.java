@@ -1,5 +1,6 @@
 package com.guardianshield.child;
 
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
@@ -7,11 +8,14 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.JSArray;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.guardianshield.child.services.LockOverlayService;
+import java.util.HashSet;
+import java.util.Set;
 
 public class MainActivity extends BridgeActivity {
     public static boolean isPauseAllActive = false;
@@ -49,7 +53,7 @@ public class MainActivity extends BridgeActivity {
             try {
                 Intent overlayIntent = new Intent(this, LockOverlayService.class);
                 if (active) {
-                    // Trás o app para frente
+                    // Traz o app para frente
                     Intent intent = new Intent(this, MainActivity.class);
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
                     startActivity(intent);
@@ -62,6 +66,8 @@ public class MainActivity extends BridgeActivity {
                     } else {
                         // Ativa a tela de sobreposição total (SYSTEM_ALERT_WINDOW)
                         overlayIntent.setAction("SHOW_OVERLAY");
+                        overlayIntent.putExtra("title", "🔒 DISPOSITIVO BLOQUEADO");
+                        overlayIntent.putExtra("message", "Pausa Geral Ativa ou Tempo Limite Esgotado.\nFale com seus pais para liberar o uso.");
                         startService(overlayIntent);
                     }
                 } else {
@@ -106,6 +112,24 @@ public class MainActivity extends BridgeActivity {
             if (activity != null) {
                 activity.updateLockState(Boolean.TRUE.equals(active));
             }
+            call.resolve();
+        }
+
+        @PluginMethod
+        public void setBlockedApps(PluginCall call) {
+            JSArray packagesArray = call.getArray("packages");
+            Set<String> set = new HashSet<>();
+            if (packagesArray != null) {
+                try {
+                    for (int i = 0; i < packagesArray.length(); i++) {
+                        set.add(packagesArray.getString(i));
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+            SharedPreferences prefs = getContext().getSharedPreferences("GuardianShieldPrefs", Context.MODE_PRIVATE);
+            prefs.edit().putStringSet("blockedPackagesSet", set).apply();
             call.resolve();
         }
     }
