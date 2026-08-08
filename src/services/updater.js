@@ -1,6 +1,6 @@
 // Service de Auto-Update Direto via Servidor em Nuvem e GitHub
 const GITHUB_REPO = 'nevermind1999/guardian-shield-kid';
-const DIRECT_APK_URL = 'https://guardian-shield.oguiazevedo.com/apks/GuardianShield-Filho.apk';
+const DIRECT_APK_URL = 'https://guardian-shield.oguiazevedo.com/api/download/filho';
 const CURRENT_BUILD_SHA = 'cd7671d';
 
 export async function checkForAppUpdates() {
