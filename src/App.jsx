@@ -3,6 +3,7 @@ import { io } from 'socket.io-client';
 import { Device } from '@capacitor/device';
 import { Network } from '@capacitor/network';
 import { Browser } from '@capacitor/browser';
+import { App as CapApp } from '@capacitor/app';
 import { checkForAppUpdates } from './services/updater';
 import {
   Clock, Shield, Lock, AlertTriangle, CheckCircle, 
@@ -40,13 +41,27 @@ export default function App() {
   const [pairingError, setPairingError] = useState('');
   const [isPairingLoading, setIsPairingLoading] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
+  const [showRequestModal, setShowRequestModal] = useState(false);
+  const [simulatedBlockedApp, setSimulatedBlockedApp] = useState(null);
 
-  const handleOpenDownload = async (url) => {
-    try {
-      await Browser.open({ url });
-    } catch (e) {
-      window.open(url, '_system') || (window.location.href = url);
-    }
+  // Tratamento nativo do botão Voltar do Android
+  useEffect(() => {
+    const backListener = CapApp.addListener('backButton', () => {
+      if (showRequestModal) {
+        setShowRequestModal(false);
+      } else if (simulatedBlockedApp) {
+        setSimulatedBlockedApp(null);
+      }
+    });
+
+    return () => {
+      backListener.then(l => l.remove());
+    };
+  }, [showRequestModal, simulatedBlockedApp]);
+
+  const handleOpenDownload = (url) => {
+    // Download direto do APK sem navegar para o GitHub
+    window.location.href = url;
   };
 
   // DETECÇÃO DINÂMICA REAL DO APARELHO (Samsung A06, etc.) E REDE WI-FI
@@ -92,11 +107,9 @@ export default function App() {
   const [realBattery, setRealBattery] = useState(88);
   const [realLocation, setRealLocation] = useState(null);
   
-  const [showRequestModal, setShowRequestModal] = useState(false);
   const [reason, setReason] = useState('');
   const [requestedMinutes, setRequestedMinutes] = useState(15);
   const [requestSentNotice, setRequestSentNotice] = useState(false);
-  const [simulatedBlockedApp, setSimulatedBlockedApp] = useState(null);
 
   // 1. Coleta de dados reais de bateria
   useEffect(() => {
