@@ -3,51 +3,63 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <ImageView
-        android:id="@+id/wallpaperImage"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:scaleType="centerCrop"
-        android:background="#0B132B"
-        android:contentDescription="@null" />
-
+    <!-- O papel de parede real é desenhado pelo próprio sistema atrás desta janela
+         (tema AppTheme.Launcher com windowShowWallpaper=true). Este scrim só escurece
+         um pouco pra manter o texto legível em cima de qualquer wallpaper. -->
     <View
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="#33000000" />
-
-    <ImageButton
-        android:id="@+id/settingsButton"
-        android:layout_width="44dp"
-        android:layout_height="44dp"
-        android:layout_gravity="top|end"
-        android:layout_margin="16dp"
-        android:background="@drawable/bg_app_icon"
-        android:src="@android:drawable/ic_menu_manage"
-        android:tint="#FFFFFF"
-        android:contentDescription="Configurações do GuardianShield" />
+        android:background="#3A000000" />
 
     <LinearLayout
         android:id="@+id/contentColumn"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:gravity="center_horizontal"
-        android:paddingBottom="24dp">
+        android:orientation="vertical">
 
+        <!-- TOPO: engrenagem de configurações + paleta de personalização -->
         <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="0dp"
-            android:layout_weight="1"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="end"
+            android:padding="12dp">
+
+            <ImageButton
+                android:id="@+id/paletteButton"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:layout_marginEnd="8dp"
+                android:background="@drawable/bg_app_icon"
+                android:src="@android:drawable/ic_menu_gallery"
+                android:tint="#FFFFFF"
+                android:contentDescription="Personalizar tela inicial" />
+
+            <ImageButton
+                android:id="@+id/settingsButton"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:background="@drawable/bg_app_icon"
+                android:src="@android:drawable/ic_menu_manage"
+                android:tint="#FFFFFF"
+                android:contentDescription="Configurações do GuardianShield" />
+        </LinearLayout>
+
+        <!-- RELÓGIO: arrastar pra cima também abre a gaveta de apps -->
+        <LinearLayout
+            android:id="@+id/clockContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:gravity="center">
+            android:gravity="center"
+            android:paddingVertical="20dp">
 
             <TextView
                 android:id="@+id/clockText"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:textColor="#FFFFFF"
-                android:textSize="56sp"
+                android:textSize="48sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -59,12 +71,13 @@
                 android:textSize="15sp" />
         </LinearLayout>
 
+        <!-- STATUS: bateria + tempo restante + pedir tempo extra -->
         <LinearLayout
             android:id="@+id/statusPill"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="20dp"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="12dp"
             android:orientation="horizontal"
             android:gravity="center_vertical"
             android:background="@drawable/bg_status_pill"
@@ -100,47 +113,40 @@
                 android:paddingVertical="8dp" />
         </LinearLayout>
 
-        <LinearLayout
+        <!-- GRID DA TELA INICIAL: quantos apps o usuário quiser fixar aqui, com o
+             número de colunas que ele escolher em "Personalizar" -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/homeGridRecyclerView"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:paddingHorizontal="8dp">
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:paddingHorizontal="8dp" />
 
-            <HorizontalScrollView
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:scrollbars="none"
-                android:overScrollMode="never">
+        <TextView
+            android:id="@+id/emptyHomeHint"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:padding="32dp"
+            android:text="Toque e segure um app na gaveta para fixar aqui na tela inicial"
+            android:textColor="#99FFFFFF"
+            android:textSize="13sp"
+            android:visibility="gone" />
 
-                <LinearLayout
-                    android:id="@+id/dockContainer"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center" />
-            </HorizontalScrollView>
+        <!-- ALÇA DA GAVETA: toque ou arraste pra cima pra abrir -->
+        <FrameLayout
+            android:id="@+id/drawerHandle"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_gravity="center_horizontal">
 
-            <!-- Botão da gaveta: fica FORA da área rolável, sempre visível -->
-            <FrameLayout
-                android:id="@+id/drawerButtonFrame"
-                android:layout_width="56dp"
-                android:layout_height="56dp"
-                android:layout_marginStart="8dp"
-                android:background="@drawable/bg_app_icon"
-                android:foreground="?android:attr/selectableItemBackgroundBorderless"
-                android:clickable="true"
-                android:focusable="true">
-
-                <ImageView
-                    android:layout_width="26dp"
-                    android:layout_height="26dp"
-                    android:layout_gravity="center"
-                    android:src="@android:drawable/ic_menu_view"
-                    android:tint="#FFFFFF"
-                    android:contentDescription="Ver todos os aplicativos" />
-            </FrameLayout>
-        </LinearLayout>
+            <View
+                android:layout_width="44dp"
+                android:layout_height="5dp"
+                android:layout_gravity="center"
+                android:background="@drawable/bg_status_pill" />
+        </FrameLayout>
     </LinearLayout>
 </FrameLayout>

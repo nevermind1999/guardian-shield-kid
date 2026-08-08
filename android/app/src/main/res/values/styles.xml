@@ -19,4 +19,13 @@
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
         <item name="android:background">@drawable/splash</item>
     </style>
+
+    <!-- Tema da Home nativa: pede ao sistema pra desenhar o papel de parede real por trás
+         da janela (é assim que launchers de verdade mostram o wallpaper — sem precisar
+         ler o bitmap via WallpaperManager, que exige permissão negada em Android 13+). -->
+    <style name="AppTheme.Launcher" parent="AppTheme.NoActionBar">
+        <item name="android:windowShowWallpaper">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorBackgroundCacheHint">@null</item>
+    </style>
 </resources>

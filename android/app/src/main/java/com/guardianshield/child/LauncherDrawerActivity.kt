@@ -7,6 +7,7 @@ import android.text.TextWatcher
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -52,7 +53,15 @@ class LauncherDrawerActivity : AppCompatActivity() {
         val spanCount = ((resources.displayMetrics.widthPixels / density) / 84).toInt().coerceAtLeast(3)
         recyclerView.layoutManager = GridLayoutManager(this, spanCount)
 
-        adapter = AppGridAdapter(allApps) { app -> AppRepository.launch(this, app.packageName) }
+        adapter = AppGridAdapter(
+            allApps = allApps,
+            onLaunch = { app -> AppRepository.launch(this, app.packageName) },
+            onLongPress = { app ->
+                val nowPinned = GuardianPrefs.togglePinned(this, app.packageName)
+                val message = if (nowPinned) "${app.label} fixado na tela inicial" else "${app.label} removido da tela inicial"
+                Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+            }
+        )
         recyclerView.adapter = adapter
 
         findViewById<ImageButton>(R.id.backButton).setOnClickListener { finish() }
