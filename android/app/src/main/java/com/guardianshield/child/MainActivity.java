@@ -6,15 +6,10 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
-import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.drawable.BitmapDrawable;
-import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.util.Base64;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -24,11 +19,14 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.guardianshield.child.services.LockOverlayService;
 import com.guardianshield.child.services.ParentalAccessibilityService;
-import java.io.ByteArrayOutputStream;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 
+/**
+ * Este Activity é o app Capacitor/React de pareamento e configurações. A tela inicial
+ * (Home) e a gaveta de apps do aparelho são nativas — veja LauncherHomeActivity e
+ * LauncherDrawerActivity — por isso este Activity NÃO tem mais o intent-filter de HOME.
+ */
 public class MainActivity extends BridgeActivity {
     public static boolean isPauseAllActive = false;
 
@@ -41,7 +39,7 @@ public class MainActivity extends BridgeActivity {
         // Inicializa o estado persistente do SharedPreferences
         SharedPreferences prefs = getSharedPreferences("GuardianShieldPrefs", MODE_PRIVATE);
         isPauseAllActive = prefs.getBoolean("isPauseAllActive", false);
-        
+
         if (this.bridge != null && this.bridge.getWebView() != null) {
             this.bridge.getWebView().setDownloadListener((url, userAgent, contentDisposition, mimetype, contentLength) -> {
                 try {
@@ -75,7 +73,7 @@ public class MainActivity extends BridgeActivity {
     public void updateLockState(boolean active) {
         isPauseAllActive = active;
 
-        // Persiste o estado no SharedPreferences para o AccessibilityService e o sistema lerem
+        // Persiste o estado no SharedPreferences para o AccessibilityService e a Home nativa lerem
         SharedPreferences prefs = getSharedPreferences("GuardianShieldPrefs", MODE_PRIVATE);
         prefs.edit().putBoolean("isPauseAllActive", active).apply();
 
@@ -83,8 +81,8 @@ public class MainActivity extends BridgeActivity {
             try {
                 Intent overlayIntent = new Intent(this, LockOverlayService.class);
                 if (active) {
-                    // Traz o app para frente
-                    Intent intent = new Intent(this, MainActivity.class);
+                    // Traz a Home nativa para frente (é o "lugar seguro" da criança agora)
+                    Intent intent = new Intent(this, LauncherHomeActivity.class);
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
                     startActivity(intent);
 
@@ -163,6 +161,22 @@ public class MainActivity extends BridgeActivity {
             call.resolve();
         }
 
+        /**
+         * Persiste limite diário / minutos usados hoje para a Home nativa (LauncherHomeActivity)
+         * mostrar "Xh Ym restantes" sem precisar da própria conexão Socket.IO.
+         */
+        @PluginMethod
+        public void setScreenTimeInfo(PluginCall call) {
+            Integer dailyLimitMinutes = call.getInt("dailyLimitMinutes", 120);
+            Integer usedMinutesToday = call.getInt("usedMinutesToday", 0);
+            SharedPreferences prefs = getContext().getSharedPreferences("GuardianShieldPrefs", Context.MODE_PRIVATE);
+            prefs.edit()
+                .putInt("dailyLimitMinutes", dailyLimitMinutes)
+                .putInt("usedMinutesToday", usedMinutesToday)
+                .apply();
+            call.resolve();
+        }
+
         @PluginMethod
         public void checkAccessibilityStatus(PluginCall call) {
             boolean enabled = MainActivity.isAccessibilityServiceEnabled(getContext());
@@ -178,62 +192,32 @@ public class MainActivity extends BridgeActivity {
             getContext().startActivity(intent);
             call.resolve();
         }
+
+        /**
+         * Permite ao React saber se este Activity foi aberto pela Home nativa pedindo
+         * para abrir direto o modal de "Solicitar Tempo Extra".
+         */
+        @PluginMethod
+        public void getLaunchIntentExtras(PluginCall call) {
+            MainActivity activity = (MainActivity) getActivity();
+            boolean openRequestModal = activity != null && activity.getIntent().getBooleanExtra("open_request_modal", false);
+            if (activity != null && openRequestModal) {
+                activity.getIntent().removeExtra("open_request_modal");
+            }
+            JSObject result = new JSObject();
+            result.put("openRequestModal", openRequestModal);
+            call.resolve(result);
+        }
     }
 
     /**
-     * Plugin que transforma o GuardianShield em uma tela inicial (Launcher) real:
-     * lista os apps de verdade instalados no aparelho (com ícone), permite abrir
-     * os liberados e nega o toque nos bloqueados diretamente na origem.
+     * Plugin de apoio à configuração da Home nativa: verifica se o GuardianShield já é a
+     * tela inicial padrão do Android e abre a tela de configuração para o usuário trocar.
+     * A listagem/abertura de apps em si agora é feita nativamente por LauncherHomeActivity
+     * e LauncherDrawerActivity, sem depender do bridge Capacitor.
      */
     @CapacitorPlugin(name = "LauncherModule")
     public static class LauncherModule extends Plugin {
-
-        @PluginMethod
-        public void getInstalledApps(PluginCall call) {
-            try {
-                PackageManager pm = getContext().getPackageManager();
-                Intent mainIntent = new Intent(Intent.ACTION_MAIN, null);
-                mainIntent.addCategory(Intent.CATEGORY_LAUNCHER);
-                List<ResolveInfo> resolvedApps = pm.queryIntentActivities(mainIntent, 0);
-                String selfPackage = getContext().getPackageName();
-
-                JSArray apps = new JSArray();
-                for (ResolveInfo info : resolvedApps) {
-                    String packageName = info.activityInfo.packageName;
-                    if (selfPackage.equals(packageName)) continue; // Não lista o próprio GuardianShield
-
-                    JSObject app = new JSObject();
-                    app.put("package", packageName);
-                    app.put("name", info.loadLabel(pm).toString());
-                    app.put("icon", loadIconAsBase64(pm, info));
-                    apps.put(app);
-                }
-
-                JSObject result = new JSObject();
-                result.put("apps", apps);
-                call.resolve(result);
-            } catch (Exception e) {
-                call.reject("Erro ao listar aplicativos instalados", e);
-            }
-        }
-
-        @PluginMethod
-        public void launchApp(PluginCall call) {
-            String packageName = call.getString("package");
-            if (packageName == null) {
-                call.reject("Parâmetro 'package' é obrigatório");
-                return;
-            }
-            PackageManager pm = getContext().getPackageManager();
-            Intent launchIntent = pm.getLaunchIntentForPackage(packageName);
-            if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                getContext().startActivity(launchIntent);
-                call.resolve();
-            } else {
-                call.reject("Não foi possível abrir o aplicativo: " + packageName);
-            }
-        }
 
         @PluginMethod
         public void isDefaultLauncher(PluginCall call) {
@@ -264,28 +248,6 @@ public class MainActivity extends BridgeActivity {
                 getContext().startActivity(chooser);
             }
             call.resolve();
-        }
-
-        private String loadIconAsBase64(PackageManager pm, ResolveInfo info) {
-            try {
-                Drawable drawable = info.loadIcon(pm);
-                Bitmap bitmap;
-                if (drawable instanceof BitmapDrawable) {
-                    bitmap = ((BitmapDrawable) drawable).getBitmap();
-                } else {
-                    int width = Math.max(drawable.getIntrinsicWidth(), 1);
-                    int height = Math.max(drawable.getIntrinsicHeight(), 1);
-                    bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-                    Canvas canvas = new Canvas(bitmap);
-                    drawable.setBounds(0, 0, canvas.getWidth(), canvas.getHeight());
-                    drawable.draw(canvas);
-                }
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                bitmap.compress(Bitmap.CompressFormat.PNG, 80, baos);
-                return "data:image/png;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
-            } catch (Exception e) {
-                return "";
-            }
         }
     }
 }

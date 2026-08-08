@@ -5,7 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.view.accessibility.AccessibilityEvent
 import android.util.Log
-import com.guardianshield.child.MainActivity
+import com.guardianshield.child.LauncherHomeActivity
 
 class ParentalAccessibilityService : AccessibilityService() {
 
@@ -88,7 +88,9 @@ class ParentalAccessibilityService : AccessibilityService() {
     }
 
     private fun bringGuardianShieldToFront() {
-        val intent = Intent(this, MainActivity::class.java)
+        // Traz a Home nativa (LauncherHomeActivity) para frente — é o "lugar seguro"
+        // pra onde a criança deve voltar quando um app é bloqueado.
+        val intent = Intent(this, LauncherHomeActivity::class.java)
         intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         startActivity(intent)
     }
