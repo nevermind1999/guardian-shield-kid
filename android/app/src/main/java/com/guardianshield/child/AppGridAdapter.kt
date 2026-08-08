@@ -12,15 +12,16 @@ import androidx.recyclerview.widget.RecyclerView
 import com.guardianshield.child.model.AppEntry
 
 /**
- * Grade de apps reutilizada pela Gaveta (todos os apps) e pela Home nativa (só os fixados).
- * Apps bloqueados (Pausa Geral ou bloqueio individual) ficam em escala de cinza, apagados e
- * SEM click listener — o toque não faz nada. Toque e segure aciona [onLongPress] (fixar/
- * desafixar da tela inicial), quando fornecido.
+ * Grade de apps reutilizada pela Gaveta (todos os apps, com busca) e pela Home nativa
+ * (só os fixados, reordenável por arrastar). Apps bloqueados (Pausa Geral ou bloqueio
+ * individual) ficam em escala de cinza, apagados e SEM click listener — o toque não faz
+ * nada. Toque e segure aciona [onLongPress] com o próprio ViewHolder (pra quem chamou
+ * poder abrir um menu ancorado nele ou iniciar um arrastar via ItemTouchHelper).
  */
 class AppGridAdapter(
     allApps: List<AppEntry>,
     private val onLaunch: (AppEntry) -> Unit,
-    private val onLongPress: ((AppEntry) -> Unit)? = null
+    private val onLongPress: ((AppEntry, RecyclerView.ViewHolder) -> Unit)? = null
 ) : RecyclerView.Adapter<AppGridAdapter.ViewHolder>() {
 
     private var allApps: List<AppEntry> = allApps
@@ -51,6 +52,19 @@ class AppGridAdapter(
         notifyDataSetChanged()
     }
 
+    /** Reordena em memória (usado pelo ItemTouchHelper durante o arrastar). Não filtra. */
+    fun moveItem(fromPosition: Int, toPosition: Int) {
+        val mutable = visibleApps.toMutableList()
+        val moved = mutable.removeAt(fromPosition)
+        mutable.add(toPosition, moved)
+        visibleApps = mutable
+        allApps = mutable
+        notifyItemMoved(fromPosition, toPosition)
+    }
+
+    /** Ordem atual dos pacotes — chamado ao soltar o arrastar, pra persistir. */
+    fun currentPackageOrder(): List<String> = visibleApps.map { it.packageName }
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
         val view = LayoutInflater.from(parent.context).inflate(R.layout.item_app_icon, parent, false)
         return ViewHolder(view)
@@ -70,7 +84,12 @@ class AppGridAdapter(
         private val lockIcon: ImageView = itemView.findViewById(R.id.lockIcon)
         private val labelText: TextView = itemView.findViewById(R.id.labelText)
 
-        fun bind(app: AppEntry, blocked: Boolean, onLaunch: (AppEntry) -> Unit, onLongPress: ((AppEntry) -> Unit)?) {
+        fun bind(
+            app: AppEntry,
+            blocked: Boolean,
+            onLaunch: (AppEntry) -> Unit,
+            onLongPress: ((AppEntry, RecyclerView.ViewHolder) -> Unit)?
+        ) {
             iconImage.setImageDrawable(app.icon)
             labelText.text = app.label
             lockIcon.visibility = if (blocked) View.VISIBLE else View.GONE
@@ -87,12 +106,12 @@ class AppGridAdapter(
                 iconFrame.setOnClickListener { onLaunch(app) }
             }
 
-            // Fixar/desafixar funciona mesmo com o app bloqueado (não depende do clique normal).
+            // Toque e segure funciona mesmo com o app bloqueado (não depende do clique normal).
             // Precisa ir no iconFrame (não só no itemView) porque é ele quem realmente
             // captura o toque na área do ícone — o itemView sozinho só veria toques na
             // margem/rótulo, que o usuário raramente toca.
             val longClickListener = if (onLongPress != null) {
-                View.OnLongClickListener { onLongPress(app); true }
+                View.OnLongClickListener { onLongPress(app, this); true }
             } else {
                 null
             }

@@ -4,8 +4,19 @@
     android:layout_height="match_parent">
 
     <!-- O papel de parede real é desenhado pelo próprio sistema atrás desta janela
-         (tema AppTheme.Launcher com windowShowWallpaper=true). Este scrim só escurece
-         um pouco pra manter o texto legível em cima de qualquer wallpaper. -->
+         (tema AppTheme.Launcher com windowShowWallpaper=true). -->
+
+    <!-- Vídeo de fundo animado (opcional): só existe/aparece quando o usuário escolhe um
+         em "Personalizar". Fica escondido (GONE) por padrão pra não gastar recurso à toa;
+         só é criado/tocado enquanto a Home está em primeiro plano. -->
+    <TextureView
+        android:id="@+id/videoWallpaper"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+    <!-- Escurece um pouco o que estiver atrás (wallpaper estático ou vídeo) pra manter
+         o texto legível. -->
     <View
         android:layout_width="match_parent"
         android:layout_height="match_parent"

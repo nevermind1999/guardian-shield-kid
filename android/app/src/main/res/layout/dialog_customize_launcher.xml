@@ -47,7 +47,52 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:columnCount="4"
-            android:layout_marginBottom="8dp" />
+            android:layout_marginBottom="24dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Vídeo de fundo animado"
+            android:textColor="#CCFFFFFF"
+            android:textSize="13sp"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Toca só enquanto você está na tela inicial, sem som"
+            android:textColor="#77FFFFFF"
+            android:textSize="11sp"
+            android:layout_marginBottom="10dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/chooseVideoButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="8dp"
+                android:text="Escolher vídeo"
+                android:textAllCaps="false"
+                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:background="@drawable/bg_app_icon" />
+
+            <Button
+                android:id="@+id/removeVideoButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Remover vídeo"
+                android:textAllCaps="false"
+                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:background="@drawable/bg_app_icon" />
+        </LinearLayout>
 
         <Button
             android:id="@+id/closeDialogButton"

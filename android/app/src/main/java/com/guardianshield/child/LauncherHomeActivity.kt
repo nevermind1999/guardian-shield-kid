@@ -6,7 +6,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.graphics.Matrix
+import android.graphics.SurfaceTexture
 import android.graphics.drawable.GradientDrawable
+import android.media.MediaPlayer
+import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
@@ -14,18 +18,24 @@ import android.os.Handler
 import android.os.Looper
 import android.view.GestureDetector
 import android.view.MotionEvent
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.GestureDetectorCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.RecyclerView
 import com.guardianshield.child.model.AppEntry
 import com.guardianshield.child.util.AppRepository
@@ -34,12 +44,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.max
 
 /**
  * Tela inicial (Home) nativa do GuardianShield: relógio, papel de parede real do aparelho
- * (desenhado pelo sistema via tema Launcher — ver styles.xml), status de bateria/tempo
- * restante e uma grade com quantos apps o usuário quiser fixar (colunas e cores
- * personalizáveis). Arrastar pra cima ou tocar na alça abre a gaveta com todos os apps.
+ * (ou vídeo animado, se o usuário escolher um — toca só aqui, mudo, e é liberado assim que
+ * a Home sai de primeiro plano), status de bateria/tempo restante e uma grade com quantos
+ * apps o usuário quiser fixar (arrastável pra reordenar, colunas e cores personalizáveis).
+ * Arrastar pra cima ou tocar na alça abre a gaveta com todos os apps.
  * 100% Views nativas (sem WebView) — o app Capacitor/React fica só para pareamento/config.
  */
 class LauncherHomeActivity : AppCompatActivity() {
@@ -47,6 +59,7 @@ class LauncherHomeActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
     private var apps: List<AppEntry> = emptyList()
     private lateinit var homeAdapter: AppGridAdapter
+    private lateinit var itemTouchHelper: ItemTouchHelper
 
     private val Int.dp: Int
         get() = (this * resources.displayMetrics.density).toInt()
@@ -59,8 +72,24 @@ class LauncherHomeActivity : AppCompatActivity() {
     private lateinit var drawerHandle: View
     private lateinit var homeGridRecyclerView: RecyclerView
     private lateinit var emptyHomeHint: View
+    private lateinit var videoWallpaper: TextureView
 
     private lateinit var swipeUpDetector: GestureDetectorCompat
+
+    // --- Vídeo de fundo: só existe enquanto a Home está em primeiro plano ---
+    private var mediaPlayer: MediaPlayer? = null
+    private val pickVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (e: SecurityException) {
+                // Alguns provedores não suportam permissão persistente; segue mesmo assim,
+                // pode parar de funcionar após reiniciar o app nesse caso raro.
+            }
+            GuardianPrefs.setVideoWallpaperUri(this, uri.toString())
+            setupVideoWallpaper()
+        }
+    }
 
     private val clockHandler = Handler(Looper.getMainLooper())
     private val clockTick = object : Runnable {
@@ -75,6 +104,7 @@ class LauncherHomeActivity : AppCompatActivity() {
             when (key) {
                 "homeGridColumns" -> applyGridColumns()
                 "themeColorStart", "themeColorEnd" -> applyThemeColors()
+                "homeVideoWallpaperUri" -> setupVideoWallpaper()
                 else -> refreshHomeGrid()
             }
         }
@@ -105,6 +135,7 @@ class LauncherHomeActivity : AppCompatActivity() {
         drawerHandle = findViewById(R.id.drawerHandle)
         homeGridRecyclerView = findViewById(R.id.homeGridRecyclerView)
         emptyHomeHint = findViewById(R.id.emptyHomeHint)
+        videoWallpaper = findViewById(R.id.videoWallpaper)
 
         val contentColumn = findViewById<LinearLayout>(R.id.contentColumn)
         // Modo tela cheia (edge-to-edge): o wallpaper ocupa a tela toda, mas o conteúdo
@@ -127,28 +158,37 @@ class LauncherHomeActivity : AppCompatActivity() {
             startActivity(intent)
         }
 
-        swipeUpDetector = GestureDetectorCompat(this, SwipeUpListener { openDrawer() })
-        drawerHandle.setOnClickListener { openDrawer() }
+        // A alça responde tanto a um toque simples quanto a arrastar pra cima. Precisa ser
+        // um detector PRÓPRIO (não um OnClickListener separado): ter os dois num mesmo View
+        // faz o toque "sumir" — o OnTouchListener consome o ACTION_DOWN pra rastrear o
+        // gesto e o clique normal nunca chega a disparar.
+        val drawerHandleDetector = GestureDetectorCompat(this, SwipeUpListener(treatTapAsSwipe = true) { openDrawer() })
+        drawerHandle.setOnTouchListener { _, event -> drawerHandleDetector.onTouchEvent(event) }
+
+        // Relógio e pílula de status só respondem a arrastar pra cima (toque simples neles
+        // não faz nada além do que já fazem, ex: o botão "Tempo extra" dentro da pílula).
+        swipeUpDetector = GestureDetectorCompat(this, SwipeUpListener(treatTapAsSwipe = false) { openDrawer() })
         val swipeTouchListener = View.OnTouchListener { _, event -> swipeUpDetector.onTouchEvent(event) }
-        drawerHandle.setOnTouchListener(swipeTouchListener)
         findViewById<View>(R.id.clockContainer).setOnTouchListener(swipeTouchListener)
         findViewById<View>(R.id.statusPill).setOnTouchListener(swipeTouchListener)
 
         apps = AppRepository.loadLaunchableApps(this)
         // Primeira vez que a Home abre: fixa os primeiros apps automaticamente pra não
         // começar vazia. Depois disso o usuário controla 100% via toque e segure.
-        if (!prefs.contains("pinnedHomeApps") && apps.isNotEmpty()) {
-            GuardianPrefs.setPinnedHomeApps(this, apps.take(8).map { it.packageName }.toSet())
+        if (!GuardianPrefs.hasInitializedPinnedApps(this) && apps.isNotEmpty()) {
+            GuardianPrefs.setPinnedHomeApps(this, apps.take(8).map { it.packageName })
         }
         homeAdapter = AppGridAdapter(
             allApps = emptyList(),
             onLaunch = { app -> AppRepository.launch(this, app.packageName) },
-            onLongPress = { app -> GuardianPrefs.togglePinned(this, app.packageName); refreshHomeGrid() }
+            onLongPress = { app, holder -> showAppOptionsMenu(app, holder) }
         )
         homeGridRecyclerView.adapter = homeAdapter
+        setupDragToReorder()
         applyGridColumns()
         applyThemeColors()
         refreshHomeGrid()
+        setupVideoWallpaper()
     }
 
     override fun onResume() {
@@ -157,6 +197,7 @@ class LauncherHomeActivity : AppCompatActivity() {
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         clockHandler.post(clockTick)
         refreshHomeGrid()
+        resumeVideoWallpaper()
     }
 
     override fun onPause() {
@@ -168,6 +209,9 @@ class LauncherHomeActivity : AppCompatActivity() {
             // já estava desregistrado, nada a fazer
         }
         clockHandler.removeCallbacks(clockTick)
+        // O vídeo só deve tocar com a Home em primeiro plano — libera o player assim que
+        // sair (abrir a gaveta, o painel de config, ou minimizar), pra não gastar CPU/bateria.
+        releaseVideoPlayback()
     }
 
     // A Home não fecha com o botão Voltar — igual a qualquer launcher de verdade
@@ -180,13 +224,18 @@ class LauncherHomeActivity : AppCompatActivity() {
         overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
     }
 
-    /** Detecta um "flick" pra cima (arrastar rápido) pra abrir a gaveta de apps. */
+    // ============================== GAVETA: gesto de arrastar ==============================
+
     /**
      * Detecta "arrastar pra cima" tanto por velocidade (fling rápido, gesto real de dedo)
      * quanto por distância acumulada (arrasto mais devagar) — assim funciona tanto num
-     * toque humano normal quanto num arrasto mais lento/deliberado.
+     * toque humano normal quanto num arrasto mais lento/deliberado. Quando [treatTapAsSwipe]
+     * é true (usado na alça da gaveta), um toque simples também dispara [onSwipeUp].
      */
-    private class SwipeUpListener(private val onSwipeUp: () -> Unit) : GestureDetector.SimpleOnGestureListener() {
+    private class SwipeUpListener(
+        private val treatTapAsSwipe: Boolean,
+        private val onSwipeUp: () -> Unit
+    ) : GestureDetector.SimpleOnGestureListener() {
         private var triggered = false
 
         override fun onDown(e: MotionEvent): Boolean {
@@ -216,7 +265,63 @@ class LauncherHomeActivity : AppCompatActivity() {
             return false
         }
 
-        override fun onSingleTapUp(e: MotionEvent): Boolean = false
+        override fun onSingleTapUp(e: MotionEvent): Boolean {
+            if (!treatTapAsSwipe || triggered) return false
+            triggered = true
+            onSwipeUp()
+            return true
+        }
+    }
+
+    // ============================== GRID DA HOME: mover / remover ==============================
+
+    /** Arrastar um ícone (chamado explicitamente via menu "Mover") reordena a grade ao vivo. */
+    private fun setupDragToReorder() {
+        val callback = object : ItemTouchHelper.SimpleCallback(
+            ItemTouchHelper.UP or ItemTouchHelper.DOWN or ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT, 0
+        ) {
+            // Desligado: o arrastar só começa quando o usuário escolhe "Mover" no menu do
+            // toque e segure (showAppOptionsMenu), não automaticamente em qualquer toque longo.
+            override fun isLongPressDragEnabled() = false
+
+            override fun onMove(
+                recyclerView: RecyclerView,
+                viewHolder: RecyclerView.ViewHolder,
+                target: RecyclerView.ViewHolder
+            ): Boolean {
+                homeAdapter.moveItem(viewHolder.bindingAdapterPosition, target.bindingAdapterPosition)
+                return true
+            }
+
+            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
+                // Não usamos swipe-para-remover — só arrastar pra reordenar.
+            }
+
+            override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
+                super.clearView(recyclerView, viewHolder)
+                GuardianPrefs.setPinnedHomeApps(this@LauncherHomeActivity, homeAdapter.currentPackageOrder())
+            }
+        }
+        itemTouchHelper = ItemTouchHelper(callback)
+        itemTouchHelper.attachToRecyclerView(homeGridRecyclerView)
+    }
+
+    /** Toque e segure num app da Home: mostra as opções em vez de simplesmente sumir com ele. */
+    private fun showAppOptionsMenu(app: AppEntry, holder: RecyclerView.ViewHolder) {
+        val popup = PopupMenu(this, holder.itemView)
+        popup.menu.add(0, 1, 0, "Mover")
+        popup.menu.add(0, 2, 1, "Remover da tela inicial")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                1 -> itemTouchHelper.startDrag(holder)
+                2 -> {
+                    GuardianPrefs.unpin(this, app.packageName)
+                    refreshHomeGrid()
+                }
+            }
+            true
+        }
+        popup.show()
     }
 
     private fun updateClock() {
@@ -240,8 +345,9 @@ class LauncherHomeActivity : AppCompatActivity() {
 
     private fun refreshHomeGrid() {
         updateBatteryAndTime()
-        val pinned = GuardianPrefs.pinnedHomeApps(this)
-        val pinnedApps = apps.filter { it.packageName in pinned }
+        val pinnedOrder = GuardianPrefs.pinnedHomeApps(this)
+        val appsByPackage = apps.associateBy { it.packageName }
+        val pinnedApps = pinnedOrder.mapNotNull { appsByPackage[it] }
         homeAdapter.updatePinnedApps(pinnedApps)
         homeAdapter.updateBlockedState(GuardianPrefs.blockedPackages(this), GuardianPrefs.isPauseAllActive(this))
 
@@ -260,11 +366,110 @@ class LauncherHomeActivity : AppCompatActivity() {
         gradient.cornerRadius = 10.dp.toFloat()
         requestTimeButton.background = gradient
 
-        val handlePill = (drawerHandle as android.widget.FrameLayout).getChildAt(0)
+        val handlePill = (drawerHandle as FrameLayout).getChildAt(0)
         val pillDrawable = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(start, end))
         pillDrawable.cornerRadius = 999f
         handlePill.background = pillDrawable
     }
+
+    // ============================== VÍDEO DE FUNDO ANIMADO ==============================
+
+    /**
+     * Prepara (ou esconde) o vídeo de fundo. Leve de propósito: sem som (evita decodificar
+     * áudio à toa), em loop, usando TextureView+MediaPlayer nativos do Android (sem
+     * biblioteca extra tipo ExoPlayer). Só é chamado quando a Home está visível.
+     */
+    private fun setupVideoWallpaper() {
+        val uriString = GuardianPrefs.videoWallpaperUri(this)
+        if (uriString == null) {
+            videoWallpaper.visibility = View.GONE
+            releaseVideoPlayback()
+            return
+        }
+
+        videoWallpaper.visibility = View.VISIBLE
+        if (videoWallpaper.isAvailable) {
+            startVideoPlayback(Uri.parse(uriString))
+        } else {
+            videoWallpaper.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                    startVideoPlayback(Uri.parse(uriString))
+                }
+                override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                    releaseVideoPlayback()
+                    return true
+                }
+                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+            }
+        }
+    }
+
+    /** Se a Home volta ao primeiro plano (ex: voltando da gaveta) e há vídeo, retoma. */
+    private fun resumeVideoWallpaper() {
+        if (mediaPlayer == null && GuardianPrefs.videoWallpaperUri(this) != null) {
+            setupVideoWallpaper()
+        }
+    }
+
+    private fun startVideoPlayback(uri: Uri) {
+        releaseVideoPlayback()
+        val surfaceTexture = videoWallpaper.surfaceTexture ?: return
+        try {
+            val player = MediaPlayer()
+            player.setSurface(Surface(surfaceTexture))
+            player.setDataSource(this, uri)
+            player.isLooping = true
+            player.setVolume(0f, 0f) // decorativo, sem som — mais leve e não incomoda
+            player.setOnPreparedListener { mp ->
+                fitVideoTransform(mp.videoWidth, mp.videoHeight)
+                mp.start()
+            }
+            player.setOnErrorListener { _, _, _ ->
+                // Arquivo removido/corrompido/sem acesso: desiste silenciosamente
+                releaseVideoPlayback()
+                videoWallpaper.visibility = View.GONE
+                true
+            }
+            player.prepareAsync()
+            mediaPlayer = player
+        } catch (e: Exception) {
+            videoWallpaper.visibility = View.GONE
+        }
+    }
+
+    /** Ajusta a matriz do TextureView pra cobrir a tela sem distorcer (igual a centerCrop). */
+    private fun fitVideoTransform(videoWidth: Int, videoHeight: Int) {
+        if (videoWidth <= 0 || videoHeight <= 0) return
+        videoWallpaper.post {
+            val viewWidth = videoWallpaper.width.toFloat()
+            val viewHeight = videoWallpaper.height.toFloat()
+            if (viewWidth <= 0f || viewHeight <= 0f) return@post
+
+            val scale = max(viewWidth / videoWidth, viewHeight / videoHeight)
+            val scaledWidth = videoWidth * scale
+            val scaledHeight = videoHeight * scale
+
+            val matrix = Matrix()
+            matrix.setScale(scale, scale)
+            matrix.postTranslate((viewWidth - scaledWidth) / 2f, (viewHeight - scaledHeight) / 2f)
+            videoWallpaper.setTransform(matrix)
+        }
+    }
+
+    private fun releaseVideoPlayback() {
+        mediaPlayer?.apply {
+            try {
+                stop()
+            } catch (e: Exception) {
+                // já parado ou em estado inválido, sem problema
+            }
+            release()
+        }
+        mediaPlayer = null
+    }
+
+    // ============================== DIÁLOGO "PERSONALIZAR TELA INICIAL" ==============================
 
     private fun showCustomizeDialog() {
         val view = layoutInflater.inflate(R.layout.dialog_customize_launcher, null)
@@ -314,6 +519,16 @@ class LauncherHomeActivity : AppCompatActivity() {
                 dialog.dismiss()
             }
             colorGrid.addView(swatch)
+        }
+
+        view.findViewById<Button>(R.id.chooseVideoButton).setOnClickListener {
+            pickVideoLauncher.launch(arrayOf("video/*"))
+            dialog.dismiss()
+        }
+        view.findViewById<Button>(R.id.removeVideoButton).setOnClickListener {
+            GuardianPrefs.setVideoWallpaperUri(this, null)
+            setupVideoWallpaper()
+            dialog.dismiss()
         }
 
         view.findViewById<Button>(R.id.closeDialogButton).setOnClickListener { dialog.dismiss() }

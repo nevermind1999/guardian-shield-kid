@@ -56,7 +56,7 @@ class LauncherDrawerActivity : AppCompatActivity() {
         adapter = AppGridAdapter(
             allApps = allApps,
             onLaunch = { app -> AppRepository.launch(this, app.packageName) },
-            onLongPress = { app ->
+            onLongPress = { app, _ ->
                 val nowPinned = GuardianPrefs.togglePinned(this, app.packageName)
                 val message = if (nowPinned) "${app.label} fixado na tela inicial" else "${app.label} removido da tela inicial"
                 Toast.makeText(this, message, Toast.LENGTH_SHORT).show()

@@ -13,6 +13,10 @@ import android.graphics.Color
  */
 object GuardianPrefs {
     private const val PREFS_NAME = "GuardianShieldPrefs"
+    private const val KEY_PINNED_ORDERED = "pinnedHomeAppsOrdered"
+    private const val KEY_PINNED_LEGACY = "pinnedHomeApps" // Set<String> sem ordem (versão anterior)
+    private const val ORDER_DELIMITER = "|||"
+    private const val KEY_VIDEO_WALLPAPER_URI = "homeVideoWallpaperUri"
 
     // Paleta de temas disponível para o usuário escolher em "Personalizar tela inicial".
     // Cada par é [corInicial, corFinal] de um degradê.
@@ -45,17 +49,39 @@ object GuardianPrefs {
     fun usedMinutesToday(context: Context): Int =
         of(context).getInt("usedMinutesToday", 0)
 
-    // --- Apps fixados na tela inicial (grid ajustável, quantos o usuário quiser) ---
+    // --- Apps fixados na tela inicial, em ORDEM (o usuário reorganiza arrastando) ---
 
-    fun pinnedHomeApps(context: Context): Set<String> =
-        of(context).getStringSet("pinnedHomeApps", null) ?: emptySet()
-
-    fun setPinnedHomeApps(context: Context, packages: Set<String>) {
-        of(context).edit().putStringSet("pinnedHomeApps", packages).apply()
+    fun hasInitializedPinnedApps(context: Context): Boolean {
+        val prefs = of(context)
+        return prefs.contains(KEY_PINNED_ORDERED) || prefs.contains(KEY_PINNED_LEGACY)
     }
 
+    fun pinnedHomeApps(context: Context): List<String> {
+        val prefs = of(context)
+        val raw = prefs.getString(KEY_PINNED_ORDERED, null)
+        if (raw != null) {
+            return if (raw.isEmpty()) emptyList() else raw.split(ORDER_DELIMITER)
+        }
+        // Migração de uma versão anterior que guardava um Set sem ordem definida.
+        val legacy = prefs.getStringSet(KEY_PINNED_LEGACY, null)
+        if (legacy != null) {
+            val migrated = legacy.toList()
+            setPinnedHomeApps(context, migrated)
+            return migrated
+        }
+        return emptyList()
+    }
+
+    fun setPinnedHomeApps(context: Context, packages: List<String>) {
+        of(context).edit()
+            .putString(KEY_PINNED_ORDERED, packages.joinToString(ORDER_DELIMITER))
+            .remove(KEY_PINNED_LEGACY)
+            .apply()
+    }
+
+    /** Fixa (se ainda não estava) ou desafixa (se já estava) — usado pela Gaveta. */
     fun togglePinned(context: Context, packageName: String): Boolean {
-        val current = pinnedHomeApps(context).toMutableSet()
+        val current = pinnedHomeApps(context).toMutableList()
         val nowPinned = if (current.contains(packageName)) {
             current.remove(packageName)
             false
@@ -65,6 +91,11 @@ object GuardianPrefs {
         }
         setPinnedHomeApps(context, current)
         return nowPinned
+    }
+
+    /** Remove explicitamente — usado pelo menu "Remover" da Home. */
+    fun unpin(context: Context, packageName: String) {
+        setPinnedHomeApps(context, pinnedHomeApps(context).filterNot { it == packageName })
     }
 
     // --- Colunas da grade da tela inicial (ajustável) ---
@@ -94,5 +125,14 @@ object GuardianPrefs {
             .putString("themeColorStart", startHex)
             .putString("themeColorEnd", endHex)
             .apply()
+    }
+
+    // --- Vídeo de fundo animado da Home (opcional; escolhido pelo usuário) ---
+
+    fun videoWallpaperUri(context: Context): String? =
+        of(context).getString(KEY_VIDEO_WALLPAPER_URI, null)
+
+    fun setVideoWallpaperUri(context: Context, uri: String?) {
+        of(context).edit().putString(KEY_VIDEO_WALLPAPER_URI, uri).apply()
     }
 }
