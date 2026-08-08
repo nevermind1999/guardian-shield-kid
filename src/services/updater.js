@@ -1,7 +1,9 @@
 // Service de Auto-Update Direto via Servidor em Nuvem e GitHub
 const GITHUB_REPO = 'nevermind1999/guardian-shield-kid';
 const DIRECT_APK_URL = 'https://guardian-shield.oguiazevedo.com/api/download/filho';
-const CURRENT_BUILD_SHA = '30134e4';
+// Gravado automaticamente pelo vite.config.js a partir do `git rev-parse --short HEAD`
+// no momento do build — reflete a versão de fato instalada, em vez de um valor fixo.
+const CURRENT_BUILD_SHA = typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'dev';
 
 export async function checkForAppUpdates() {
   try {
@@ -24,6 +26,8 @@ export async function checkForAppUpdates() {
           downloadUrl: DIRECT_APK_URL
         };
       }
+    } else {
+      console.log('Checagem de atualização: GitHub API respondeu', commitRes.status);
     }
   } catch (e) {
     console.log('Checagem de atualização ignorada:', e.message);
