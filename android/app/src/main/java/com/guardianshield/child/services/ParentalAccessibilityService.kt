@@ -4,12 +4,15 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.view.accessibility.AccessibilityEvent
 import android.util.Log
+import com.guardianshield.child.MainActivity
 
 class ParentalAccessibilityService : AccessibilityService() {
 
-    private val blockedPackages = mutableSetOf(
+    private val defaultBlockedPackages = mutableSetOf(
         "com.zhiliaoapp.musically", // TikTok
-        "com.dts.freefireth"        // Free Fire
+        "com.dts.freefireth",       // Free Fire
+        "com.instagram.android",   // Instagram
+        "com.google.android.youtube" // YouTube
     )
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -17,23 +20,29 @@ class ParentalAccessibilityService : AccessibilityService() {
 
         val packageName = event.packageName?.toString() ?: return
 
-        // Intercepta quando um app é aberto
+        // Intercepta qualquer app aberto em 1º plano
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             Log.d("GuardianShield", "App detectado em 1º plano: $packageName")
 
-            if (blockedPackages.contains(packageName)) {
-                Log.w("GuardianShield", "Bloqueando app não autorizado: $packageName")
-                blockAppAndShowOverlay(packageName)
+            // 1. Se a PAUSA GERAL estiver ativa, nenhum outro app pode rodar (exceto o Guardian Shield)
+            if (MainActivity.isPauseAllActive && packageName != "com.guardianshield.child") {
+                Log.w("GuardianShield", "Pausa geral ativa! Redirecionando $packageName para a tela de bloqueio.")
+                bringGuardianShieldToFront()
+                return
+            }
+
+            // 2. Se o app específico estiver na lista de bloqueados individuais
+            if (defaultBlockedPackages.contains(packageName)) {
+                Log.w("GuardianShield", "Bloqueando app individual: $packageName")
+                bringGuardianShieldToFront()
             }
         }
     }
 
-    private fun blockAppAndShowOverlay(packageName: String) {
-        // Redireciona a criança para a tela inicial (Home)
-        val startMain = Intent(Intent.ACTION_MAIN)
-        startMain.addCategory(Intent.CATEGORY_HOME)
-        startMain.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        startActivity(startMain)
+    private fun bringGuardianShieldToFront() {
+        val intent = Intent(this, MainActivity::class.java)
+        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        startActivity(intent)
     }
 
     override fun onInterrupt() {

@@ -30,21 +30,39 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
+    public void updateLockState(boolean active) {
+        isPauseAllActive = active;
+        runOnUiThread(() -> {
+            try {
+                if (active) {
+                    Intent intent = new Intent(this, MainActivity.class);
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    startActivity(intent);
+                    try {
+                        startLockTask();
+                    } catch (Exception ignored) {}
+                } else {
+                    try {
+                        stopLockTask();
+                    } catch (Exception ignored) {}
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        });
+    }
+
     @Override
     protected void onUserLeaveHint() {
         super.onUserLeaveHint();
-        // Se a Pausa Geral / Bloqueio Total estiver ativo, força o app a permanecer em primeiro plano ao tentar sair (Home / Trocar de app)
         if (isPauseAllActive) {
-            Intent intent = new Intent(this, MainActivity.class);
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            startActivity(intent);
+            updateLockState(true);
         }
     }
 
     @Override
     public void onBackPressed() {
         if (isPauseAllActive) {
-            // Se bloqueado totalmente pelos pais, impede que o botão Voltar saia da tela
             return;
         }
         if (this.bridge != null && this.bridge.getWebView() != null && this.bridge.getWebView().canGoBack()) {
@@ -59,11 +77,9 @@ public class MainActivity extends BridgeActivity {
         @PluginMethod
         public void setPauseState(PluginCall call) {
             Boolean active = call.getBoolean("active", false);
-            isPauseAllActive = Boolean.TRUE.equals(active);
-            if (isPauseAllActive && getActivity() != null) {
-                Intent intent = new Intent(getActivity(), MainActivity.class);
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                getActivity().startActivity(intent);
+            MainActivity activity = (MainActivity) getActivity();
+            if (activity != null) {
+                activity.updateLockState(Boolean.TRUE.equals(active));
             }
             call.resolve();
         }
