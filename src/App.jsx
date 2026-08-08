@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { io } from 'socket.io-client';
 import { Capacitor } from '@capacitor/core';
 import { Device } from '@capacitor/device';
@@ -43,17 +43,18 @@ export default function App() {
   const [isPairingLoading, setIsPairingLoading] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [showRequestModal, setShowRequestModal] = useState(false);
-  const [simulatedBlockedApp, setSimulatedBlockedApp] = useState(null);
   // null = ainda não verificado / plataforma web; true/false = status real do Accessibility Service nativo
   const [accessibilityEnabled, setAccessibilityEnabled] = useState(null);
+  // Apps REAIS instalados no aparelho (ícone + nome + pacote), usados para virar a tela inicial (Launcher)
+  const [installedRealApps, setInstalledRealApps] = useState(null);
+  // null = ainda não verificado; true/false = se o GuardianShield é a tela inicial padrão do Android
+  const [isDefaultLauncher, setIsDefaultLauncher] = useState(null);
 
   // Tratamento nativo do botão Voltar do Android (não fecha o app ao voltar)
   useEffect(() => {
     const handleBack = () => {
       if (showRequestModal) {
         setShowRequestModal(false);
-      } else if (simulatedBlockedApp) {
-        setSimulatedBlockedApp(null);
       }
     };
 
@@ -64,7 +65,7 @@ export default function App() {
       backListener.then(l => l.remove());
       document.removeEventListener('backButton', handleBack);
     };
-  }, [showRequestModal, simulatedBlockedApp]);
+  }, [showRequestModal]);
 
   // Verifica se o serviço de Acessibilidade (necessário para bloquear apps de fato) está habilitado.
   // Como habilitar é um passo manual do usuário em Configurações do Android, revalidamos sempre
@@ -77,10 +78,29 @@ export default function App() {
     }
   };
 
+  // Carrega a lista REAL de apps instalados (com ícone) e verifica se o GuardianShield
+  // é a tela inicial (Launcher) padrão do aparelho. Revalidamos ao voltar ao primeiro
+  // plano, já que definir o launcher padrão é um passo manual do usuário.
+  const loadLauncherState = () => {
+    if (!Capacitor.isNativePlatform() || !Capacitor.Plugins?.LauncherModule) return;
+
+    Capacitor.Plugins.LauncherModule.getInstalledApps()
+      .then(res => setInstalledRealApps(Array.isArray(res?.apps) ? res.apps : []))
+      .catch(() => setInstalledRealApps([]));
+
+    Capacitor.Plugins.LauncherModule.isDefaultLauncher()
+      .then(res => setIsDefaultLauncher(Boolean(res?.isDefault)))
+      .catch(() => setIsDefaultLauncher(null));
+  };
+
   useEffect(() => {
     checkAccessibility();
+    loadLauncherState();
     const resumeListener = CapApp.addListener('appStateChange', ({ isActive }) => {
-      if (isActive) checkAccessibility();
+      if (isActive) {
+        checkAccessibility();
+        loadLauncherState();
+      }
     });
     return () => {
       resumeListener.then(l => l.remove());
@@ -93,6 +113,12 @@ export default function App() {
     }
   };
 
+  const handleOpenHomeSettings = () => {
+    if (Capacitor.isNativePlatform() && Capacitor.Plugins?.LauncherModule?.openHomeSettings) {
+      Capacitor.Plugins.LauncherModule.openHomeSettings();
+    }
+  };
+
   const handleOpenDownload = (url) => {
     console.log('Iniciando download do APK:', url);
     try {
@@ -101,6 +127,15 @@ export default function App() {
       window.location.href = url;
     }
   };
+
+  // IDs (nomes de pacote Android) dos apps bloqueados pelos pais no momento — usado tanto para
+  // sincronizar o Accessibility Service nativo quanto para apagar/desabilitar os ícones na tela inicial.
+  const blockedPackageIdsSet = useMemo(() => {
+    const ids = (state?.blockedApps || [])
+      .filter(app => app.isBlocked)
+      .map(app => app.id || app.package || app.name);
+    return new Set(ids);
+  }, [state?.blockedApps]);
 
   // Sincronização nativa do estado de Pausa Geral / Bloqueio Total com o Android
   useEffect(() => {
@@ -115,16 +150,10 @@ export default function App() {
 
   // Sincronização nativa da lista de Apps Bloqueados Individualmente (ex: TikTok, Free Fire) com o Java
   useEffect(() => {
-    if (state?.blockedApps && Array.isArray(state.blockedApps)) {
-      const blockedPackageIds = state.blockedApps
-        .filter(app => app.isBlocked)
-        .map(app => app.id || app.package || app.name);
-
-      if (Capacitor.isNativePlatform() && Capacitor.Plugins?.PauseModule) {
-        Capacitor.Plugins.PauseModule.setBlockedApps({ packages: blockedPackageIds });
-      }
+    if (Capacitor.isNativePlatform() && Capacitor.Plugins?.PauseModule) {
+      Capacitor.Plugins.PauseModule.setBlockedApps({ packages: Array.from(blockedPackageIdsSet) });
     }
-  }, [state?.blockedApps]);
+  }, [blockedPackageIdsSet]);
 
   // DETECÇÃO DINÂMICA REAL DO APARELHO (Samsung A06, etc.) E REDE WI-FI
   const [deviceDetails, setDeviceDetails] = useState({
@@ -370,9 +399,20 @@ export default function App() {
     setReason('');
   };
 
+  // Lista real de apps do aparelho (launcher de verdade) quando disponível; usa a lista
+  // simulada vinda do servidor como fallback (preview web / antes do carregamento nativo).
+  const appsForGrid = installedRealApps && installedRealApps.length > 0
+    ? installedRealApps.map(app => ({ ...app, id: app.package }))
+    : blockedApps;
+  const isUsingRealApps = Boolean(installedRealApps && installedRealApps.length > 0);
+
+  const isAppBlocked = (app) => isBlockedOverall || blockedPackageIdsSet.has(app.id) || Boolean(app.isBlocked);
+
   const handleTryLaunchApp = (app) => {
-    if (app.isBlocked || isBlockedOverall) {
-      setSimulatedBlockedApp(app.name);
+    if (isAppBlocked(app)) return; // Ícone apagado: nenhuma ação ao tocar
+
+    if (isUsingRealApps && Capacitor.isNativePlatform() && Capacitor.Plugins?.LauncherModule) {
+      Capacitor.Plugins.LauncherModule.launchApp({ package: app.package || app.id });
     } else {
       alert(`🚀 Abrindo ${app.name}... (Acesso permitido)`);
     }
@@ -404,25 +444,6 @@ export default function App() {
           <button className="btn btn-primary" onClick={() => setShowRequestModal(true)} style={{ width: '100%', maxWidth: '280px' }}>
             <Send size={18} /> Pedir Mais Tempo aos Pais
           </button>
-        </div>
-      )}
-
-      {/* AVISO DE APP BLOQUEADO */}
-      {simulatedBlockedApp && (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 999, background: 'rgba(0,0,0,0.85)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px'
-        }}>
-          <div className="glass-panel" style={{ padding: '24px', maxWidth: '360px', width: '100%', textAlign: 'center', border: '1px solid var(--accent-rose)' }}>
-            <AlertTriangle size={36} style={{ color: 'var(--accent-rose)', margin: '0 auto 12px auto' }} />
-            <h3 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: '8px' }}>Aplicativo Bloqueado</h3>
-            <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '20px' }}>
-              O aplicativo <strong>{simulatedBlockedApp}</strong> está bloqueado no momento.
-            </p>
-            <button className="btn btn-primary" onClick={() => setSimulatedBlockedApp(null)} style={{ width: '100%' }}>
-              Entendi
-            </button>
-          </div>
         </div>
       )}
 
@@ -459,6 +480,32 @@ export default function App() {
             style={{ whiteSpace: 'nowrap' }}
           >
             <Shield size={16} /> Ativar agora
+          </button>
+        </div>
+      )}
+
+      {/* AVISO: GUARDIANSHIELD NÃO É A TELA INICIAL PADRÃO */}
+      {isDefaultLauncher === false && (
+        <div style={{
+          padding: '16px 20px', borderRadius: '16px',
+          background: 'rgba(255, 190, 11, 0.12)', border: '1px solid #ffbe0b',
+          display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px'
+        }}>
+          <div>
+            <h4 style={{ fontSize: '0.95rem', fontWeight: 800, color: '#ffbe0b', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Smartphone size={18} /> Defina como tela inicial
+            </h4>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+              Para os ícones bloqueados ficarem apagados na tela inicial, defina o GuardianShield como o
+              app padrão de Início (Home) do aparelho.
+            </p>
+          </div>
+          <button
+            onClick={handleOpenHomeSettings}
+            className="btn btn-primary"
+            style={{ whiteSpace: 'nowrap', background: '#ffbe0b', borderColor: '#ffbe0b', color: '#0f172a' }}
+          >
+            Definir agora
           </button>
         </div>
       )}
@@ -531,31 +578,77 @@ export default function App() {
         </button>
       </div>
 
-      {/* SEÇÃO DE APLICATIVOS INSTALADOS */}
+      {/* SEÇÃO DE APLICATIVOS INSTALADOS (tela inicial / Launcher) */}
       <div className="glass-panel" style={{ padding: '20px' }}>
         <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <Smartphone size={18} style={{ color: 'var(--accent-cyan)' }} /> Aplicativos Sincronizados
+          <Smartphone size={18} style={{ color: 'var(--accent-cyan)' }} /> {isUsingRealApps ? 'Meus Aplicativos' : 'Aplicativos Sincronizados'}
         </h3>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
-          {blockedApps.map(app => (
-            <button
-              key={app.id}
-              onClick={() => handleTryLaunchApp(app)}
-              style={{
-                padding: '14px', borderRadius: '12px',
-                background: app.isBlocked ? 'rgba(244, 63, 94, 0.1)' : 'rgba(255, 255, 255, 0.04)',
-                border: `1px solid ${app.isBlocked ? 'rgba(244, 63, 94, 0.3)' : 'var(--border-color)'}`,
-                color: 'white', display: 'flex', alignItems: 'center', gap: '10px',
-                cursor: 'pointer', textAlign: 'left'
-              }}
-            >
-              <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: app.isBlocked ? 'rgba(244, 63, 94, 0.2)' : 'rgba(58, 134, 255, 0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                {app.isBlocked ? <Lock size={16} style={{ color: 'var(--accent-rose)' }} /> : <Smartphone size={16} style={{ color: 'var(--accent-cyan)' }} />}
-              </div>
-              <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>{app.name}</span>
-            </button>
-          ))}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: isUsingRealApps ? 'repeat(auto-fill, minmax(72px, 1fr))' : 'repeat(2, 1fr)',
+          gap: isUsingRealApps ? '16px' : '10px'
+        }}>
+          {appsForGrid.map(app => {
+            const blocked = isAppBlocked(app);
+
+            if (isUsingRealApps) {
+              return (
+                <button
+                  key={app.package}
+                  onClick={() => handleTryLaunchApp(app)}
+                  disabled={blocked}
+                  title={blocked ? `${app.name} está bloqueado pelos seus pais` : app.name}
+                  style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px',
+                    background: 'transparent', border: 'none', padding: '4px',
+                    cursor: blocked ? 'default' : 'pointer',
+                    opacity: blocked ? 0.35 : 1,
+                    pointerEvents: blocked ? 'none' : 'auto'
+                  }}
+                >
+                  <div style={{
+                    width: '52px', height: '52px', borderRadius: '14px', overflow: 'hidden',
+                    background: 'rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    filter: blocked ? 'grayscale(1)' : 'none', position: 'relative'
+                  }}>
+                    {app.icon
+                      ? <img src={app.icon} alt={app.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      : <Smartphone size={22} style={{ color: 'var(--accent-cyan)' }} />}
+                    {blocked && (
+                      <div style={{ position: 'absolute', inset: 0, background: 'rgba(10,13,20,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <Lock size={18} style={{ color: 'white' }} />
+                      </div>
+                    )}
+                  </div>
+                  <span style={{ fontSize: '0.7rem', fontWeight: 600, textAlign: 'center', color: 'white', lineHeight: 1.2 }}>
+                    {app.name}
+                  </span>
+                </button>
+              );
+            }
+
+            return (
+              <button
+                key={app.id}
+                onClick={() => handleTryLaunchApp(app)}
+                disabled={blocked}
+                style={{
+                  padding: '14px', borderRadius: '12px',
+                  background: blocked ? 'rgba(244, 63, 94, 0.1)' : 'rgba(255, 255, 255, 0.04)',
+                  border: `1px solid ${blocked ? 'rgba(244, 63, 94, 0.3)' : 'var(--border-color)'}`,
+                  color: 'white', display: 'flex', alignItems: 'center', gap: '10px',
+                  cursor: blocked ? 'default' : 'pointer', textAlign: 'left',
+                  opacity: blocked ? 0.6 : 1
+                }}
+              >
+                <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: blocked ? 'rgba(244, 63, 94, 0.2)' : 'rgba(58, 134, 255, 0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  {blocked ? <Lock size={16} style={{ color: 'var(--accent-rose)' }} /> : <Smartphone size={16} style={{ color: 'var(--accent-cyan)' }} />}
+                </div>
+                <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>{app.name}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
 

@@ -4,10 +4,17 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.util.Base64;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -17,7 +24,9 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.guardianshield.child.services.LockOverlayService;
 import com.guardianshield.child.services.ParentalAccessibilityService;
+import java.io.ByteArrayOutputStream;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 public class MainActivity extends BridgeActivity {
@@ -26,6 +35,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(PauseModule.class);
+        registerPlugin(LauncherModule.class);
         super.onCreate(savedInstanceState);
 
         // Inicializa o estado persistente do SharedPreferences
@@ -167,6 +177,115 @@ public class MainActivity extends BridgeActivity {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             getContext().startActivity(intent);
             call.resolve();
+        }
+    }
+
+    /**
+     * Plugin que transforma o GuardianShield em uma tela inicial (Launcher) real:
+     * lista os apps de verdade instalados no aparelho (com ícone), permite abrir
+     * os liberados e nega o toque nos bloqueados diretamente na origem.
+     */
+    @CapacitorPlugin(name = "LauncherModule")
+    public static class LauncherModule extends Plugin {
+
+        @PluginMethod
+        public void getInstalledApps(PluginCall call) {
+            try {
+                PackageManager pm = getContext().getPackageManager();
+                Intent mainIntent = new Intent(Intent.ACTION_MAIN, null);
+                mainIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+                List<ResolveInfo> resolvedApps = pm.queryIntentActivities(mainIntent, 0);
+                String selfPackage = getContext().getPackageName();
+
+                JSArray apps = new JSArray();
+                for (ResolveInfo info : resolvedApps) {
+                    String packageName = info.activityInfo.packageName;
+                    if (selfPackage.equals(packageName)) continue; // Não lista o próprio GuardianShield
+
+                    JSObject app = new JSObject();
+                    app.put("package", packageName);
+                    app.put("name", info.loadLabel(pm).toString());
+                    app.put("icon", loadIconAsBase64(pm, info));
+                    apps.put(app);
+                }
+
+                JSObject result = new JSObject();
+                result.put("apps", apps);
+                call.resolve(result);
+            } catch (Exception e) {
+                call.reject("Erro ao listar aplicativos instalados", e);
+            }
+        }
+
+        @PluginMethod
+        public void launchApp(PluginCall call) {
+            String packageName = call.getString("package");
+            if (packageName == null) {
+                call.reject("Parâmetro 'package' é obrigatório");
+                return;
+            }
+            PackageManager pm = getContext().getPackageManager();
+            Intent launchIntent = pm.getLaunchIntentForPackage(packageName);
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getContext().startActivity(launchIntent);
+                call.resolve();
+            } else {
+                call.reject("Não foi possível abrir o aplicativo: " + packageName);
+            }
+        }
+
+        @PluginMethod
+        public void isDefaultLauncher(PluginCall call) {
+            PackageManager pm = getContext().getPackageManager();
+            Intent homeIntent = new Intent(Intent.ACTION_MAIN);
+            homeIntent.addCategory(Intent.CATEGORY_HOME);
+            ResolveInfo resolveInfo = pm.resolveActivity(homeIntent, PackageManager.MATCH_DEFAULT_ONLY);
+            boolean isDefault = resolveInfo != null
+                && resolveInfo.activityInfo != null
+                && getContext().getPackageName().equals(resolveInfo.activityInfo.packageName);
+            JSObject result = new JSObject();
+            result.put("isDefault", isDefault);
+            call.resolve(result);
+        }
+
+        @PluginMethod
+        public void openHomeSettings(PluginCall call) {
+            try {
+                Intent intent = new Intent(Settings.ACTION_HOME_SETTINGS);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getContext().startActivity(intent);
+            } catch (Exception e) {
+                // Alguns fabricantes não expõem a tela de "app padrão de início";
+                // como alternativa, dispara o seletor nativo de Launcher do próprio Android.
+                Intent chooser = new Intent(Intent.ACTION_MAIN);
+                chooser.addCategory(Intent.CATEGORY_HOME);
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getContext().startActivity(chooser);
+            }
+            call.resolve();
+        }
+
+        private String loadIconAsBase64(PackageManager pm, ResolveInfo info) {
+            try {
+                Drawable drawable = info.loadIcon(pm);
+                Bitmap bitmap;
+                if (drawable instanceof BitmapDrawable) {
+                    bitmap = ((BitmapDrawable) drawable).getBitmap();
+                } else {
+                    int width = Math.max(drawable.getIntrinsicWidth(), 1);
+                    int height = Math.max(drawable.getIntrinsicHeight(), 1);
+                    bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                    Canvas canvas = new Canvas(bitmap);
+                    drawable.setBounds(0, 0, canvas.getWidth(), canvas.getHeight());
+                    drawable.draw(canvas);
+                }
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                bitmap.compress(Bitmap.CompressFormat.PNG, 80, baos);
+                return "data:image/png;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
+            } catch (Exception e) {
+                return "";
+            }
         }
     }
 }
