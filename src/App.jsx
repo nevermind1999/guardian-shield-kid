@@ -1,5 +1,6 @@
 import { Device } from '@capacitor/device';
 import { Network } from '@capacitor/network';
+import { Browser } from '@capacitor/browser';
 import { checkForAppUpdates } from './services/updater';
 import {
   Clock, Shield, Lock, AlertTriangle, CheckCircle, 
@@ -22,6 +23,14 @@ export default function App() {
   const [pairingError, setPairingError] = useState('');
   const [isPairingLoading, setIsPairingLoading] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
+
+  const handleOpenDownload = async (url) => {
+    try {
+      await Browser.open({ url });
+    } catch (e) {
+      window.open(url, '_system') || (window.location.href = url);
+    }
+  };
 
   // DETECÇÃO DINÂMICA REAL DO APARELHO (Samsung A06, etc.) E REDE WI-FI
   const [deviceDetails, setDeviceDetails] = useState({
@@ -349,15 +358,13 @@ export default function App() {
             </h4>
             <p style={{ fontSize: '0.8rem', opacity: 0.9, marginTop: '2px' }}>{updateInfo.releaseNotes}</p>
           </div>
-          <a 
-            href={updateInfo.downloadUrl} 
-            target="_blank" 
-            rel="noreferrer" 
+          <button 
+            onClick={() => handleOpenDownload(updateInfo.downloadUrl)} 
             className="btn" 
-            style={{ background: 'white', color: '#0f172a', fontWeight: 800, padding: '8px 14px', fontSize: '0.85rem' }}
+            style={{ background: 'white', color: '#0f172a', fontWeight: 800, padding: '8px 14px', fontSize: '0.85rem', cursor: 'pointer' }}
           >
             Atualizar APK
-          </a>
+          </button>
         </div>
       )}
 
