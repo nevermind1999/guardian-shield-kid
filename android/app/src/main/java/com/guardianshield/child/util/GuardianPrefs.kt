@@ -46,8 +46,38 @@ object GuardianPrefs {
     fun dailyLimitMinutes(context: Context): Int =
         of(context).getInt("dailyLimitMinutes", 120)
 
-    fun usedMinutesToday(context: Context): Int =
-        of(context).getInt("usedMinutesToday", 0)
+    // --- Tempo de tela usado hoje: contado localmente pelo ParentalAccessibilityService
+    // (ele fica vivo o tempo todo enquanto a Acessibilidade estiver habilitada, diferente
+    // da WebView/React que só existe quando a criança abre as Configurações). Zera sozinho
+    // quando o dia muda, comparando com a última data registrada. ---
+
+    private const val KEY_USED_MINUTES = "usedMinutesToday"
+    private const val KEY_USAGE_DATE = "usageTrackedDate"
+
+    fun usedMinutesToday(context: Context): Int {
+        ensureUsageDateCurrent(context)
+        return of(context).getInt(KEY_USED_MINUTES, 0)
+    }
+
+    fun incrementUsedMinutesToday(context: Context, byMinutes: Int = 1) {
+        ensureUsageDateCurrent(context)
+        val prefs = of(context)
+        val current = prefs.getInt(KEY_USED_MINUTES, 0)
+        prefs.edit().putInt(KEY_USED_MINUTES, current + byMinutes).apply()
+    }
+
+    fun isDailyLimitExceeded(context: Context): Boolean =
+        usedMinutesToday(context) >= dailyLimitMinutes(context)
+
+    /** Zera o contador de uso quando a data mudou desde a última leitura/escrita. */
+    private fun ensureUsageDateCurrent(context: Context) {
+        val prefs = of(context)
+        val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+        val savedDate = prefs.getString(KEY_USAGE_DATE, null)
+        if (savedDate != today) {
+            prefs.edit().putString(KEY_USAGE_DATE, today).putInt(KEY_USED_MINUTES, 0).apply()
+        }
+    }
 
     // --- Apps fixados na tela inicial, em ORDEM (o usuário reorganiza arrastando) ---
 

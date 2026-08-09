@@ -3,11 +3,60 @@ package com.guardianshield.child.services
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import android.view.accessibility.AccessibilityEvent
 import android.util.Log
 import com.guardianshield.child.LauncherHomeActivity
+import com.guardianshield.child.util.GuardianPrefs
 
 class ParentalAccessibilityService : AccessibilityService() {
+
+    private val tickHandler = Handler(Looper.getMainLooper())
+    private var tickRunnable: Runnable? = null
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        startUsageTicker()
+    }
+
+    /**
+     * Contador de tempo de tela: este serviço é o único componente do app que fica vivo o
+     * tempo todo (a WebView/React só existe quando a criança abre as Configurações, e a Home
+     * nativa pode ser destruída pelo sistema) — por isso é aqui, e não no JS, que o "usado
+     * hoje" precisa ser contado de verdade. A cada minuto, se a tela estiver ligada, soma 1
+     * minuto; ao ultrapassar o limite diário, bloqueia igual à Pausa Geral.
+     */
+    private fun startUsageTicker() {
+        tickRunnable?.let { tickHandler.removeCallbacks(it) }
+        val runnable = object : Runnable {
+            override fun run() {
+                tickUsageOnce()
+                tickHandler.postDelayed(this, 60_000L)
+            }
+        }
+        tickRunnable = runnable
+        tickHandler.postDelayed(runnable, 60_000L)
+    }
+
+    private fun tickUsageOnce() {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val screenOn = powerManager?.isInteractive ?: true
+        if (!screenOn) return
+
+        GuardianPrefs.incrementUsedMinutesToday(this)
+        if (GuardianPrefs.isDailyLimitExceeded(this) && !GuardianPrefs.isPauseAllActive(this)) {
+            Log.w("GuardianShield", "Tempo limite diário esgotado — bloqueando dispositivo.")
+            showOverlay("⏳ TEMPO ESGOTADO", "Você já usou todo o tempo de tela de hoje.\nFale com seus pais para liberar mais tempo.")
+            bringGuardianShieldToFront()
+        }
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        tickRunnable?.let { tickHandler.removeCallbacks(it) }
+        return super.onUnbind(intent)
+    }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -18,14 +67,25 @@ class ParentalAccessibilityService : AccessibilityService() {
             val prefs = getSharedPreferences("GuardianShieldPrefs", Context.MODE_PRIVATE)
             val isPauseAllActive = prefs.getBoolean("isPauseAllActive", false)
             val blockedPackagesSet = prefs.getStringSet("blockedPackagesSet", emptySet()) ?: emptySet()
+            val isTimeExpired = GuardianPrefs.isDailyLimitExceeded(this)
 
-            Log.d("GuardianShield", "App em 1º plano: $packageName | PausaGeral: $isPauseAllActive | Bloqueados: $blockedPackagesSet")
+            Log.d("GuardianShield", "App em 1º plano: $packageName | PausaGeral: $isPauseAllActive | TempoEsgotado: $isTimeExpired | Bloqueados: $blockedPackagesSet")
 
-            // 1. Se a PAUSA GERAL estiver ativa, nenhum app pode ser aberto (exceto o próprio Guardian Shield)
-            if (isPauseAllActive) {
+            // 1. Se a PAUSA GERAL estiver ativa OU o tempo diário tiver acabado, nenhum app
+            // pode ser aberto (exceto o próprio Guardian Shield)
+            if (isPauseAllActive || isTimeExpired) {
                 if (packageName != "com.guardianshield.child") {
-                    Log.w("GuardianShield", "Pausa Geral Ativa! Forçando sobreposição para $packageName")
-                    showOverlay("🔒 DISPOSITIVO BLOQUEADO", "Pausa Geral Ativa ou Tempo Limite Esgotado.\nFale com seus pais para liberar o uso.")
+                    val title: String
+                    val message: String
+                    if (isTimeExpired && !isPauseAllActive) {
+                        title = "⏳ TEMPO ESGOTADO"
+                        message = "Você já usou todo o tempo de tela de hoje.\nFale com seus pais para liberar mais tempo."
+                    } else {
+                        title = "🔒 DISPOSITIVO BLOQUEADO"
+                        message = "Pausa Geral Ativa ou Tempo Limite Esgotado.\nFale com seus pais para liberar o uso."
+                    }
+                    Log.w("GuardianShield", "Bloqueio ativo! Forçando sobreposição para $packageName")
+                    showOverlay(title, message)
                     bringGuardianShieldToFront()
                 }
                 return

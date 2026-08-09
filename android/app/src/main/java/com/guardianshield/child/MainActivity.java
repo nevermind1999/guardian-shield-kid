@@ -19,6 +19,7 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.guardianshield.child.services.LockOverlayService;
 import com.guardianshield.child.services.ParentalAccessibilityService;
+import com.guardianshield.child.util.GuardianPrefs;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -162,19 +163,33 @@ public class MainActivity extends BridgeActivity {
         }
 
         /**
-         * Persiste limite diário / minutos usados hoje para a Home nativa (LauncherHomeActivity)
-         * mostrar "Xh Ym restantes" sem precisar da própria conexão Socket.IO.
+         * Persiste o limite diário definido pelos pais (inclui bônus de tempo extra aprovado)
+         * para a Home nativa (LauncherHomeActivity) e o AccessibilityService lerem. O
+         * "usedMinutesToday" NÃO é mais gravado por aqui: quem conta de verdade é o
+         * ParentalAccessibilityService, que fica vivo o tempo todo — diferente desta WebView,
+         * que só existe enquanto a criança está com as Configurações abertas. Um parâmetro
+         * usedMinutesToday recebido aqui (versões antigas do JS) é simplesmente ignorado.
          */
         @PluginMethod
         public void setScreenTimeInfo(PluginCall call) {
             Integer dailyLimitMinutes = call.getInt("dailyLimitMinutes", 120);
-            Integer usedMinutesToday = call.getInt("usedMinutesToday", 0);
             SharedPreferences prefs = getContext().getSharedPreferences("GuardianShieldPrefs", Context.MODE_PRIVATE);
             prefs.edit()
                 .putInt("dailyLimitMinutes", dailyLimitMinutes)
-                .putInt("usedMinutesToday", usedMinutesToday)
                 .apply();
             call.resolve();
+        }
+
+        /**
+         * Lê o tempo de uso contado de verdade nativamente, para esta Activity reportar ao
+         * backend via telemetria (antes era um número aleatório de placeholder).
+         */
+        @PluginMethod
+        public void getScreenTimeInfo(PluginCall call) {
+            JSObject result = new JSObject();
+            result.put("dailyLimitMinutes", GuardianPrefs.INSTANCE.dailyLimitMinutes(getContext()));
+            result.put("usedMinutesToday", GuardianPrefs.INSTANCE.usedMinutesToday(getContext()));
+            call.resolve(result);
         }
 
         @PluginMethod

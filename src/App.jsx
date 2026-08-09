@@ -137,18 +137,19 @@ export default function App() {
     return new Set(ids);
   }, [state?.blockedApps]);
 
-  // Sincronização nativa do estado de Pausa Geral / Bloqueio Total + tempo de tela restante
-  // (a Home nativa em Kotlin lê esses valores do SharedPreferences para se atualizar sozinha)
+  // Sincronização nativa do estado de Pausa Geral + limite diário definido pelos pais (a Home
+  // nativa em Kotlin lê esses valores do SharedPreferences para se atualizar sozinha). O
+  // "usado hoje" NÃO é mais empurrado daqui: quem conta de verdade é o
+  // ParentalAccessibilityService nativo (fica vivo o tempo todo, diferente desta WebView) —
+  // sobrescrever com o valor do servidor aqui reintroduziria o bug do contador não andar
+  // sozinho, já que esta tela só existe enquanto a criança está nas Configurações.
   useEffect(() => {
     const dailyLimitMinutes = state?.screenTime?.dailyLimitMinutes || 120;
-    const usedMinutesToday = state?.screenTime?.usedMinutesToday || 0;
     const isPaused = state?.screenTime?.isPauseAllActive || false;
-    const isExpired = usedMinutesToday >= dailyLimitMinutes;
-    const isBlockedOverall = isPaused || isExpired;
 
     if (Capacitor.isNativePlatform() && Capacitor.Plugins?.PauseModule) {
-      Capacitor.Plugins.PauseModule.setPauseState({ active: isBlockedOverall });
-      Capacitor.Plugins.PauseModule.setScreenTimeInfo?.({ dailyLimitMinutes, usedMinutesToday });
+      Capacitor.Plugins.PauseModule.setPauseState({ active: isPaused });
+      Capacitor.Plugins.PauseModule.setScreenTimeInfo?.({ dailyLimitMinutes });
     }
   }, [state?.screenTime]);
 
@@ -295,14 +296,27 @@ export default function App() {
   useEffect(() => {
     if (!socket || !isConnected) return;
 
-    const interval = setInterval(() => {
+    const sendTelemetry = async () => {
+      // Tempo usado hoje contado de verdade pelo ParentalAccessibilityService nativo (antes
+      // era um número aleatório de placeholder aqui — por isso o contador nunca refletia o
+      // uso real do aparelho).
+      let usedMinutesToday = 0;
+      if (Capacitor.isNativePlatform() && Capacitor.Plugins?.PauseModule?.getScreenTimeInfo) {
+        try {
+          const info = await Capacitor.Plugins.PauseModule.getScreenTimeInfo();
+          usedMinutesToday = info?.usedMinutesToday || 0;
+        } catch (e) {
+          // sem valor nativo disponível — mantém 0
+        }
+      }
+
       socket.emit('child:telemetry', {
         deviceId: deviceDetails.id,
         deviceName: deviceDetails.name,
         deviceModel: deviceDetails.model,
         batteryLevel: realBattery,
         networkType: networkInfo.connectionType || 'wifi',
-        usedMinutesToday: Math.min(120, Math.floor(Math.random() * 45) + 30),
+        usedMinutesToday,
         location: realLocation,
         installedApps: [
           { package: 'com.whatsapp', name: 'WhatsApp', usageMinutes: 45, isBlocked: false },
@@ -312,8 +326,10 @@ export default function App() {
           { package: 'com.dts.freefireth', name: 'Free Fire', usageMinutes: 15, isBlocked: true }
         ]
       });
-    }, 10000);
+    };
 
+    sendTelemetry();
+    const interval = setInterval(sendTelemetry, 10000);
     return () => clearInterval(interval);
   }, [socket, isConnected, realBattery, realLocation, deviceDetails, networkInfo]);
 
