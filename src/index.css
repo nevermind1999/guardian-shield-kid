@@ -4,13 +4,41 @@
   --border-color: rgba(255, 255, 255, 0.08);
   --text-primary: #ffffff;
   --text-secondary: #a0aec0;
-  
+  /* Texto sobre fundos coloridos (botões com gradiente, banners de aviso) — fica
+     branco nos dois temas, contraste garantido pela cor de acento por trás. */
+  --text-on-accent: #ffffff;
+
+  /* Camadas de destaque sutil dentro de um glass-panel (inputs, barra de progresso) —
+     antes eram valores rgba(255,255,255,0.0x) soltos direto no JSX, não respondiam
+     à troca de tema. */
+  --surface-1: rgba(255, 255, 255, 0.03);
+  --surface-2: rgba(255, 255, 255, 0.05);
+  --surface-3: rgba(255, 255, 255, 0.1);
+  /* Fundo escurecido atrás do modal de "pedir tempo extra" */
+  --overlay-scrim: rgba(0, 0, 0, 0.8);
+
   --accent-cyan: #3a86ff;
   --accent-emerald: #06d6a0;
   --accent-amber: #ffbe0b;
   --accent-rose: #ff006e;
-  
+
   --font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+/* Modo claro: aplicado via document.documentElement.setAttribute('data-theme', 'light')
+   (ver hook de tema no App.jsx). A tela de bloqueio de tela cheia (isBlockedOverall)
+   fica intencionalmente escura nos dois temas — não usa essas variáveis. */
+[data-theme="light"] {
+  --bg-primary: #f3f5fa;
+  --bg-card: rgba(255, 255, 255, 0.78);
+  --border-color: rgba(15, 23, 42, 0.09);
+  --text-primary: #0f172a;
+  --text-secondary: #52607a;
+
+  --surface-1: rgba(15, 23, 42, 0.035);
+  --surface-2: rgba(15, 23, 42, 0.05);
+  --surface-3: rgba(15, 23, 42, 0.08);
+  --overlay-scrim: rgba(15, 23, 42, 0.5);
 }
 
 * {
@@ -51,10 +79,20 @@ body {
 
 .btn-primary {
   background: linear-gradient(135deg, #3a86ff, #8338ec);
-  color: white;
+  color: var(--text-on-accent);
 }
 
 .btn-primary:hover {
   transform: translateY(-2px);
   box-shadow: 0 4px 15px rgba(58, 134, 255, 0.4);
+}
+
+.btn-ghost {
+  background: var(--surface-2);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+}
+
+.btn-ghost:hover {
+  background: var(--surface-3);
 }

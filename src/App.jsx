@@ -4,10 +4,11 @@ import { Capacitor } from '@capacitor/core';
 import { Device } from '@capacitor/device';
 import { Network } from '@capacitor/network';
 import { App as CapApp } from '@capacitor/app';
+import { StatusBar, Style } from '@capacitor/status-bar';
 import { checkForAppUpdates } from './services/updater';
 import {
   Clock, Shield, Lock, AlertTriangle, CheckCircle,
-  Send, Smartphone, X, QrCode, Key, Download, BatteryMedium
+  Send, Smartphone, X, QrCode, Key, Download, BatteryMedium, Moon, Sun
 } from 'lucide-react';
 
 const SERVER_URLS = [
@@ -21,13 +22,9 @@ const DEFAULT_INITIAL_STATE = {
   pairedDevices: {},
   deviceInfo: { name: 'Celular da Criança', model: 'Android' },
   screenTime: { dailyLimitMinutes: 120, usedMinutesToday: 0, isPauseAllActive: false },
-  blockedApps: [
-    { id: 'com.whatsapp', name: 'WhatsApp', isBlocked: false },
-    { id: 'com.zhiliaoapp.musically', name: 'TikTok', isBlocked: false },
-    { id: 'com.instagram.android', name: 'Instagram', isBlocked: false },
-    { id: 'com.google.android.youtube', name: 'YouTube', isBlocked: false },
-    { id: 'com.dts.freefireth', name: 'Free Fire', isBlocked: true }
-  ],
+  // Preenchido de verdade assim que a primeira telemetria com a lista real do
+  // aparelho (via LauncherModule.getInstalledApps) chegar no backend e voltar.
+  blockedApps: [],
   rules: { dailyLimitMinutes: 120, isPauseAllActive: false, blockedApps: [] },
   location: { latitude: -23.550520, longitude: -46.633308 }
 };
@@ -51,6 +48,26 @@ export default function App() {
   const [accessibilityEnabled, setAccessibilityEnabled] = useState(null);
   // null = ainda não verificado; true/false = se o GuardianShield é a tela inicial padrão do Android
   const [isDefaultLauncher, setIsDefaultLauncher] = useState(null);
+  // Lista real dos apps instalados no aparelho (via LauncherModule.getInstalledApps,
+  // mesma fonte nativa que já alimenta a Home/Gaveta) — enviada na telemetria em vez
+  // da lista fixa que existia antes.
+  const [installedAppsList, setInstalledAppsList] = useState([]);
+
+  // Modo claro/escuro: por padrão segue o tema do sistema (prefers-color-scheme);
+  // se a pessoa já trocou manualmente antes, essa escolha prevalece.
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem('guardianshield_theme');
+    if (saved) return saved;
+    return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  });
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('guardianshield_theme', theme);
+    if (Capacitor.isNativePlatform()) {
+      StatusBar.setStyle({ style: theme === 'light' ? Style.Light : Style.Dark }).catch(() => {});
+    }
+  }, [theme]);
+  const toggleTheme = () => setTheme(t => (t === 'light' ? 'dark' : 'light'));
 
   // Tratamento nativo do botão Voltar do Android (não fecha o app ao voltar)
   useEffect(() => {
@@ -241,6 +258,25 @@ export default function App() {
     }
   }, []);
 
+  // 2b. Lista real de apps instalados (LauncherModule.getInstalledApps) — muda raramente,
+  // então busca só ao abrir e depois a cada 5min, sem sobrecarregar a telemetria de 10s.
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform() || !Capacitor.Plugins?.LauncherModule?.getInstalledApps) return;
+
+    const fetchInstalledApps = async () => {
+      try {
+        const { apps } = await Capacitor.Plugins.LauncherModule.getInstalledApps();
+        setInstalledAppsList(apps || []);
+      } catch (e) {
+        // mantém a última lista conhecida em caso de erro
+      }
+    };
+
+    fetchInstalledApps();
+    const interval = setInterval(fetchInstalledApps, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   // 3. Conexão Socket.IO
   useEffect(() => {
     let activeSocket = null;
@@ -321,20 +357,16 @@ export default function App() {
         networkType: networkInfo.connectionType || 'wifi',
         usedMinutesToday,
         location: realLocation,
-        installedApps: [
-          { package: 'com.whatsapp', name: 'WhatsApp', usageMinutes: 45, isBlocked: false },
-          { package: 'com.zhiliaoapp.musically', name: 'TikTok', usageMinutes: 30, isBlocked: false },
-          { package: 'com.instagram.android', name: 'Instagram', usageMinutes: 25, isBlocked: false },
-          { package: 'com.google.android.youtube', name: 'YouTube', usageMinutes: 20, isBlocked: false },
-          { package: 'com.dts.freefireth', name: 'Free Fire', usageMinutes: 15, isBlocked: true }
-        ]
+        // Lista real do aparelho (ver efeito 2b acima) — antes era um array fixo de
+        // 5 apps fake que nunca mudava, então o pai nunca via os apps de verdade.
+        installedApps: installedAppsList.map(a => ({ package: a.packageName, name: a.label }))
       });
     };
 
     sendTelemetry();
     const interval = setInterval(sendTelemetry, 10000);
     return () => clearInterval(interval);
-  }, [socket, isConnected, realBattery, realLocation, deviceDetails, networkInfo]);
+  }, [socket, isConnected, realBattery, realLocation, deviceDetails, networkInfo, installedAppsList]);
 
   const handlePairSubmit = (e) => {
     e.preventDefault();
@@ -366,7 +398,7 @@ export default function App() {
     return (
       <div style={{ maxWidth: '440px', margin: '0 auto', padding: '32px 20px', minHeight: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '24px' }}>
         <div className="glass-panel" style={{ padding: '28px', textAlign: 'center' }}>
-          <div style={{ width: '64px', height: '64px', borderRadius: '20px', background: 'linear-gradient(135deg, #3a86ff, #8338ec)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px auto', color: 'white' }}>
+          <div style={{ width: '64px', height: '64px', borderRadius: '20px', background: 'linear-gradient(135deg, #3a86ff, #8338ec)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px auto', color: 'var(--text-on-accent)' }}>
             <QrCode size={34} />
           </div>
 
@@ -390,8 +422,8 @@ export default function App() {
               required
               style={{
                 width: '100%', padding: '14px', borderRadius: '12px',
-                border: '1px solid var(--border-color)', background: 'rgba(255,255,255,0.05)',
-                color: 'white', outline: 'none', fontSize: '1.1rem', textAlign: 'center', fontWeight: 'bold', letterSpacing: '2px'
+                border: '1px solid var(--border-color)', background: 'var(--surface-2)',
+                color: 'var(--text-primary)', outline: 'none', fontSize: '1.1rem', textAlign: 'center', fontWeight: 'bold', letterSpacing: '2px'
               }}
             />
 
@@ -467,9 +499,19 @@ export default function App() {
             <BatteryMedium size={14} /> {realBattery}%
           </p>
         </div>
-        <span style={{ fontSize: '0.75rem', padding: '6px 12px', borderRadius: '20px', background: 'rgba(6, 214, 160, 0.15)', color: 'var(--accent-emerald)', border: '1px solid rgba(6, 214, 160, 0.3)' }}>
-          Sincronizado
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <button
+            className="btn btn-ghost"
+            onClick={toggleTheme}
+            title={theme === 'light' ? 'Mudar para modo escuro' : 'Mudar para modo claro'}
+            style={{ padding: '8px' }}
+          >
+            {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
+          </button>
+          <span style={{ fontSize: '0.75rem', padding: '6px 12px', borderRadius: '20px', background: 'rgba(6, 214, 160, 0.15)', color: 'var(--accent-emerald)', border: '1px solid rgba(6, 214, 160, 0.3)' }}>
+            Sincronizado
+          </span>
+        </div>
       </header>
 
       {/* AVISO: PROTEÇÃO DE BLOQUEIO DESATIVADA (Accessibility Service não habilitado) */}
@@ -502,11 +544,11 @@ export default function App() {
       {isDefaultLauncher === false && (
         <div style={{
           padding: '16px 20px', borderRadius: '16px',
-          background: 'rgba(255, 190, 11, 0.12)', border: '1px solid #ffbe0b',
+          background: 'rgba(255, 190, 11, 0.12)', border: '1px solid var(--accent-amber)',
           display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px'
         }}>
           <div>
-            <h4 style={{ fontSize: '0.95rem', fontWeight: 800, color: '#ffbe0b', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <h4 style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--accent-amber)', display: 'flex', alignItems: 'center', gap: '8px' }}>
               <Smartphone size={18} /> Defina como tela inicial
             </h4>
             <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
@@ -517,7 +559,7 @@ export default function App() {
           <button
             onClick={handleOpenHomeSettings}
             className="btn btn-primary"
-            style={{ whiteSpace: 'nowrap', background: '#ffbe0b', borderColor: '#ffbe0b', color: '#0f172a' }}
+            style={{ whiteSpace: 'nowrap', background: 'var(--accent-amber)', borderColor: 'var(--accent-amber)', color: '#0f172a' }}
           >
             Definir agora
           </button>
@@ -529,7 +571,7 @@ export default function App() {
         <div style={{
           padding: '16px 20px', borderRadius: '16px',
           background: 'linear-gradient(135deg, var(--accent-cyan), #8338ec)',
-          color: 'white', display: 'flex', flexWrap: 'wrap', alignItems: 'center',
+          color: 'var(--text-on-accent)', display: 'flex', flexWrap: 'wrap', alignItems: 'center',
           justifyContent: 'space-between', gap: '12px', boxShadow: '0 8px 24px rgba(58, 134, 255, 0.3)'
         }}>
           <div>
@@ -546,7 +588,7 @@ export default function App() {
                 )}
                 <button
                   onClick={() => setShowFullReleaseNotes(v => !v)}
-                  style={{ background: 'transparent', border: 'none', color: 'white', textDecoration: 'underline', fontSize: '0.75rem', padding: 0, marginTop: '6px', cursor: 'pointer' }}
+                  style={{ background: 'transparent', border: 'none', color: 'var(--text-on-accent)', textDecoration: 'underline', fontSize: '0.75rem', padding: 0, marginTop: '6px', cursor: 'pointer' }}
                 >
                   {showFullReleaseNotes ? 'Ver menos' : 'Ver mais'}
                 </button>
@@ -570,7 +612,7 @@ export default function App() {
                 if (updateInfo.latestSha) localStorage.setItem('dismissed_update_sha', updateInfo.latestSha);
                 setUpdateInfo(null);
               }}
-              style={{ background: 'transparent', border: 'none', color: 'white', cursor: 'pointer', padding: '4px' }}
+              style={{ background: 'transparent', border: 'none', color: 'var(--text-on-accent)', cursor: 'pointer', padding: '4px' }}
               title="Dispensar aviso"
             >
               <X size={18} />
@@ -595,7 +637,7 @@ export default function App() {
           {Math.floor(remainingMinutes / 60)}h {remainingMinutes % 60}m
         </div>
 
-        <div style={{ height: '8px', background: 'rgba(255,255,255,0.1)', borderRadius: '4px', overflow: 'hidden', margin: '16px 0' }}>
+        <div style={{ height: '8px', background: 'var(--surface-3)', borderRadius: '4px', overflow: 'hidden', margin: '16px 0' }}>
           <div style={{
             height: '100%', width: `${(remainingMinutes / screenTime.dailyLimitMinutes) * 100}%`,
             background: 'linear-gradient(90deg, #3a86ff, #06d6a0)', borderRadius: '4px'
@@ -611,7 +653,7 @@ export default function App() {
       {showRequestModal && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 10000,
-          background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(10px)',
+          background: 'var(--overlay-scrim)', backdropFilter: 'blur(10px)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px'
         }}>
           <div className="glass-panel" style={{ padding: '24px', maxWidth: '400px', width: '100%' }}>
@@ -630,11 +672,11 @@ export default function App() {
                 <select
                   value={requestedMinutes}
                   onChange={(e) => setRequestedMinutes(e.target.value)}
-                  style={{ width: '100%', padding: '10px', borderRadius: '8px', background: 'rgba(255,255,255,0.05)', color: 'white', border: '1px solid var(--border-color)', outline: 'none' }}
+                  style={{ width: '100%', padding: '10px', borderRadius: '8px', background: 'var(--surface-2)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', outline: 'none' }}
                 >
-                  <option value="15" style={{ background: '#121826' }}>15 minutos</option>
-                  <option value="30" style={{ background: '#121826' }}>30 minutos</option>
-                  <option value="60" style={{ background: '#121826' }}>1 hora</option>
+                  <option value="15" style={{ background: 'var(--bg-card)' }}>15 minutos</option>
+                  <option value="30" style={{ background: 'var(--bg-card)' }}>30 minutos</option>
+                  <option value="60" style={{ background: 'var(--bg-card)' }}>1 hora</option>
                 </select>
               </div>
 
@@ -648,7 +690,7 @@ export default function App() {
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
                   required
-                  style={{ width: '100%', padding: '10px', borderRadius: '8px', background: 'rgba(255,255,255,0.05)', color: 'white', border: '1px solid var(--border-color)', outline: 'none' }}
+                  style={{ width: '100%', padding: '10px', borderRadius: '8px', background: 'var(--surface-2)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', outline: 'none' }}
                 />
               </div>
 

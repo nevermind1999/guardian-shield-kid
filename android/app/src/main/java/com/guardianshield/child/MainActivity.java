@@ -21,10 +21,13 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.guardianshield.child.model.AppEntry;
 import com.guardianshield.child.services.LockOverlayService;
 import com.guardianshield.child.services.ParentalAccessibilityService;
+import com.guardianshield.child.util.AppRepository;
 import com.guardianshield.child.util.GuardianPrefs;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -335,6 +338,27 @@ public class MainActivity extends BridgeActivity {
                 getContext().startActivity(chooser);
             }
             call.resolve();
+        }
+
+        /**
+         * Lista real dos apps instalados/abríveis no aparelho (mesma fonte que já
+         * alimenta a Home e a Gaveta nativas — AppRepository), pra substituir a lista
+         * fixa e fake que o lado React mandava pro backend na telemetria. Ícone fica
+         * de fora por ora (converter Drawable pra base64 por app pesaria o payload).
+         */
+        @PluginMethod
+        public void getInstalledApps(PluginCall call) {
+            List<AppEntry> apps = AppRepository.INSTANCE.loadLaunchableApps(getContext());
+            JSArray result = new JSArray();
+            for (AppEntry app : apps) {
+                JSObject obj = new JSObject();
+                obj.put("packageName", app.getPackageName());
+                obj.put("label", app.getLabel());
+                result.put(obj);
+            }
+            JSObject ret = new JSObject();
+            ret.put("apps", result);
+            call.resolve(ret);
         }
     }
 
