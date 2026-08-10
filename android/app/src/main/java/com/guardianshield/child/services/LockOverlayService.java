@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.IBinder;
 import android.provider.Settings;
@@ -13,10 +14,12 @@ import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -26,14 +29,28 @@ import com.guardianshield.child.util.GuardianPrefs;
 import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.Date;
-import java.util.List;
 import java.util.Locale;
 
+/**
+ * Tela de bloqueio em tela cheia (Pausa Geral / tarefas pendentes / tempo esgotado /
+ * app bloqueado). Visual em "vidro fosco" (glassmorphism) sobre um fundo escuro com
+ * um brilho gradiente sutil na cor de destaque que o pai já escolheu pra Home (mesmas
+ * cores de GuardianPrefs.themeColors, pra ficar consistente com o resto do app) —
+ * sem depender de blur de verdade (RenderEffect só existe a partir da API 31, e o
+ * minSdk daqui é 23), então o efeito é feito com painéis semitransparentes + borda
+ * clara fina, técnica padrão de "glass card" que funciona em qualquer versão.
+ */
 public class LockOverlayService extends Service {
     // Janela de exceção temporária pro bloqueio (ver GuardianPrefs.setTaskSubmissionAllowedUntil):
     // tempo suficiente pra abrir a câmera do sistema, tirar a foto e voltar sem ser
     // barrado de volta pra essa tela no meio do caminho.
     private static final long TASK_SUBMISSION_WINDOW_MS = 3 * 60 * 1000L;
+
+    // Largura do "cartão" central (todos os blocos — cabeçalho, tarefas, PIN — se
+    // alinham nessa mesma largura, em vez de cada um ter seu próprio valor solto
+    // como antes, que foi a causa do card de tarefa ficar espremido/quebrado).
+    private static final int CONTENT_WIDTH_DP = 300;
+    private static final String BG_DARK = "#0b1120";
 
     private WindowManager windowManager;
     private View overlayView;
@@ -95,27 +112,55 @@ public class LockOverlayService extends Service {
 
             windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
 
+            // ScrollView com fillViewport: se o conteúdo (cabeçalho + tarefas + PIN)
+            // couber na tela, fica centralizado verticalmente como antes; se não couber
+            // (várias tarefas, ou teclado aberto), passa a rolar em vez de cortar.
+            ScrollView scrollRoot = new ScrollView(this);
+            scrollRoot.setFillViewport(true);
+            scrollRoot.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            scrollRoot.setBackground(buildRootBackground());
+
             LinearLayout layout = new LinearLayout(this);
             layout.setOrientation(LinearLayout.VERTICAL);
             layout.setGravity(Gravity.CENTER);
-            layout.setBackgroundColor(Color.parseColor("#0f172a")); // Fundo escuro igual ao tema do app
+            layout.setLayoutParams(new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            layout.setPadding(dp(24), dp(56), dp(24), dp(56));
+            scrollRoot.addView(layout);
+
+            // --- Cartão de cabeçalho: tarja gradiente de destaque + título + mensagem ---
+            LinearLayout headerCard = new LinearLayout(this);
+            headerCard.setOrientation(LinearLayout.VERTICAL);
+            headerCard.setGravity(Gravity.CENTER);
+            headerCard.setBackground(buildGlassCard());
+            headerCard.setPadding(dp(24), dp(28), dp(24), dp(28));
+            LinearLayout.LayoutParams headerParams = new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT);
+            headerCard.setLayoutParams(headerParams);
+
+            View accentStrip = new View(this);
+            accentStrip.setBackground(buildAccentGradient(dp(6)));
+            LinearLayout.LayoutParams stripParams = new LinearLayout.LayoutParams(dp(56), dp(5));
+            stripParams.bottomMargin = dp(18);
+            accentStrip.setLayoutParams(stripParams);
+            headerCard.addView(accentStrip);
 
             titleView = new TextView(this);
             titleView.setText(titleText);
             titleView.setTextColor(Color.WHITE);
-            titleView.setTextSize(24);
+            titleView.setTextSize(22);
             titleView.setGravity(Gravity.CENTER);
-            titleView.setPadding(32, 0, 32, 20);
+            headerCard.addView(titleView);
 
             subtitleView = new TextView(this);
             subtitleView.setText(subtitleText);
             subtitleView.setTextColor(Color.parseColor("#94a3b8"));
-            subtitleView.setTextSize(16);
+            subtitleView.setTextSize(15);
             subtitleView.setGravity(Gravity.CENTER);
-            subtitleView.setPadding(32, 0, 32, 0);
+            LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            subtitleParams.topMargin = dp(8);
+            subtitleView.setLayoutParams(subtitleParams);
+            headerCard.addView(subtitleView);
 
-            layout.addView(titleView);
-            layout.addView(subtitleView);
+            layout.addView(headerCard);
 
             if (showTaskList) {
                 taskListContainer = buildTaskListView();
@@ -125,6 +170,15 @@ public class LockOverlayService extends Service {
             }
 
             if (showPinField) {
+                LinearLayout pinCard = new LinearLayout(this);
+                pinCard.setOrientation(LinearLayout.VERTICAL);
+                pinCard.setGravity(Gravity.CENTER);
+                pinCard.setBackground(buildGlassCard());
+                pinCard.setPadding(dp(20), dp(20), dp(20), dp(20));
+                LinearLayout.LayoutParams pinCardParams = new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT);
+                pinCardParams.topMargin = dp(16);
+                pinCard.setLayoutParams(pinCardParams);
+
                 pinInputView = new EditText(this);
                 pinInputView.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
                 pinInputView.setFilters(new InputFilter[]{ new InputFilter.LengthFilter(6) });
@@ -133,25 +187,23 @@ public class LockOverlayService extends Service {
                 pinInputView.setHintTextColor(Color.parseColor("#64748b"));
                 pinInputView.setGravity(Gravity.CENTER);
                 pinInputView.setTextSize(20);
-                pinInputView.setBackgroundColor(Color.parseColor("#1e293b"));
-                pinInputView.setPadding(24, 20, 24, 20);
-                LinearLayout.LayoutParams pinParams = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                );
-                pinParams.width = 320;
-                pinParams.topMargin = 40;
-                pinInputView.setLayoutParams(pinParams);
-                layout.addView(pinInputView);
+                pinInputView.setBackground(buildInputFieldBackground());
+                pinInputView.setPadding(dp(16), dp(14), dp(16), dp(14));
+                pinInputView.setLayoutParams(new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+                pinCard.addView(pinInputView);
 
                 Button unlockButton = new Button(this);
                 unlockButton.setText("Desbloquear");
-                LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                );
-                btnParams.topMargin = 16;
+                unlockButton.setTextColor(Color.WHITE);
+                unlockButton.setAllCaps(false);
+                unlockButton.setBackground(buildAccentGradient(dp(14)));
+                LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                btnParams.topMargin = dp(14);
                 unlockButton.setLayoutParams(btnParams);
                 unlockButton.setOnClickListener(v -> attemptPinUnlock());
-                layout.addView(unlockButton);
+                pinCard.addView(unlockButton);
+
+                layout.addView(pinCard);
             } else {
                 pinInputView = null;
             }
@@ -177,12 +229,77 @@ public class LockOverlayService extends Service {
             );
             params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
 
-            windowManager.addView(layout, params);
-            overlayView = layout;
+            windowManager.addView(scrollRoot, params);
+            overlayView = scrollRoot;
             isShowing = true;
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    // --- Desenho: gradiente de fundo, cartões de vidro e botão de destaque, todos
+    // reaproveitando a cor de tema que o pai já escolheu pra Home (GuardianPrefs.
+    // themeColors) — a tela de bloqueio fica visualmente consistente com o resto do
+    // app em vez de usar uma paleta nova e solta. ---
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private int withAlpha(int color, int alpha) {
+        return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color));
+    }
+
+    /**
+     * Mistura duas cores 100% opacas (sem canal alpha) — usado pro brilho do fundo em
+     * vez de baixar o alpha da cor de destaque, porque alpha < 255 nessa camada deixa
+     * a tela por trás da janela (Home, o que a criança estava usando) vazar por baixo
+     * da sobreposição, prejudicando a leitura. O "vidro" fica só nos cards internos,
+     * por cima desse fundo já sólido — nunca na janela inteira.
+     */
+    private int blendOpaque(int colorA, int colorB, float ratioOfA) {
+        int r = Math.round(Color.red(colorA) * ratioOfA + Color.red(colorB) * (1 - ratioOfA));
+        int g = Math.round(Color.green(colorA) * ratioOfA + Color.green(colorB) * (1 - ratioOfA));
+        int b = Math.round(Color.blue(colorA) * ratioOfA + Color.blue(colorB) * (1 - ratioOfA));
+        return Color.rgb(r, g, b);
+    }
+
+    /** Fundo 100% opaco (nunca deixa a tela por trás da janela aparecer) com um brilho na cor de destaque, no topo. */
+    private GradientDrawable buildRootBackground() {
+        int accent = GuardianPrefs.INSTANCE.themeColors(this).getFirst();
+        int dark = Color.parseColor(BG_DARK);
+        int glow = blendOpaque(accent, dark, 0.4f);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setGradientType(GradientDrawable.RADIAL_GRADIENT);
+        bg.setGradientRadius(dp(420));
+        bg.setGradientCenter(0.5f, 0.24f);
+        bg.setColors(new int[]{ glow, dark });
+        return bg;
+    }
+
+    /** "Vidro fosco": painel semitransparente com borda clara fina, sem precisar de blur de verdade. */
+    private GradientDrawable buildGlassCard() {
+        GradientDrawable card = new GradientDrawable();
+        card.setColor(Color.argb(28, 255, 255, 255));
+        card.setCornerRadius(dp(20));
+        card.setStroke(dp(1), Color.argb(46, 255, 255, 255));
+        return card;
+    }
+
+    /** Linha/botão em degradê definido (as duas cores de tema escolhidas pelo pai), o "destaque" da tela. */
+    private GradientDrawable buildAccentGradient(int cornerRadiusPx) {
+        kotlin.Pair<Integer, Integer> theme = GuardianPrefs.INSTANCE.themeColors(this);
+        GradientDrawable gradient = new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{ theme.getFirst(), theme.getSecond() });
+        gradient.setCornerRadius(cornerRadiusPx);
+        return gradient;
+    }
+
+    private GradientDrawable buildInputFieldBackground() {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.argb(40, 255, 255, 255));
+        bg.setCornerRadius(dp(12));
+        bg.setStroke(dp(1), Color.argb(60, 255, 255, 255));
+        return bg;
     }
 
     /**
@@ -194,9 +311,16 @@ public class LockOverlayService extends Service {
     private LinearLayout buildTaskListView() {
         LinearLayout container = new LinearLayout(this);
         container.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams containerParams = new LinearLayout.LayoutParams(340, LinearLayout.LayoutParams.WRAP_CONTENT);
-        containerParams.topMargin = 24;
+        LinearLayout.LayoutParams containerParams = new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT);
+        containerParams.topMargin = dp(16);
         container.setLayoutParams(containerParams);
+
+        TextView heading = new TextView(this);
+        heading.setText("📋 Tarefas de hoje");
+        heading.setTextColor(Color.parseColor("#94a3b8"));
+        heading.setTextSize(13);
+        heading.setPadding(dp(4), 0, 0, dp(8));
+        container.addView(heading);
 
         for (GuardianPrefs.TaskItem task : GuardianPrefs.INSTANCE.parsedTodayTasks(this)) {
             container.addView(buildTaskRow(task));
@@ -204,41 +328,55 @@ public class LockOverlayService extends Service {
         return container;
     }
 
+    /**
+     * Card de tarefa em DUAS linhas — ícone+título+recompensa em cima, status/botão de
+     * enviar foto embaixo ocupando a largura toda. Antes era tudo numa linha horizontal
+     * só (ícone + título + um Button "Enviar Foto"), e o título ficava espremido pro
+     * botão caber do lado, quebrando letra por letra.
+     */
     private View buildTaskRow(GuardianPrefs.TaskItem task) {
         LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackgroundColor(Color.parseColor("#1e293b"));
-        row.setPadding(20, 16, 20, 16);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setBackground(buildGlassCard());
+        row.setPadding(dp(16), dp(14), dp(16), dp(14));
         LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        rowParams.bottomMargin = 10;
+        rowParams.bottomMargin = dp(10);
         row.setLayoutParams(rowParams);
+
+        LinearLayout topLine = new LinearLayout(this);
+        topLine.setOrientation(LinearLayout.HORIZONTAL);
+        topLine.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView iconView = new TextView(this);
         iconView.setText(task.getIcon());
-        iconView.setTextSize(22);
-        iconView.setPadding(0, 0, 16, 0);
-        row.addView(iconView);
-
-        LinearLayout infoColumn = new LinearLayout(this);
-        infoColumn.setOrientation(LinearLayout.VERTICAL);
-        infoColumn.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        iconView.setTextSize(20);
+        iconView.setPadding(0, 0, dp(10), 0);
+        topLine.addView(iconView);
 
         TextView taskTitleView = new TextView(this);
         taskTitleView.setText(task.getTitle());
         taskTitleView.setTextColor(Color.WHITE);
         taskTitleView.setTextSize(15);
-        infoColumn.addView(taskTitleView);
+        taskTitleView.setMaxLines(2);
+        // weight=1: o título recebe todo o espaço restante da linha (a recompensa ao
+        // lado é só um selo curto) — essa era exatamente a largura que faltava antes.
+        taskTitleView.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        topLine.addView(taskTitleView);
 
         TextView rewardView = new TextView(this);
-        rewardView.setText("+" + task.getRewardMinutes() + " min");
-        rewardView.setTextColor(Color.parseColor("#64748b"));
+        rewardView.setText("+" + task.getRewardMinutes() + "min");
+        rewardView.setTextColor(Color.parseColor("#94a3b8"));
         rewardView.setTextSize(12);
-        infoColumn.addView(rewardView);
+        rewardView.setBackground(buildInputFieldBackground());
+        rewardView.setPadding(dp(8), dp(3), dp(8), dp(3));
+        LinearLayout.LayoutParams rewardParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rewardParams.leftMargin = dp(8);
+        rewardView.setLayoutParams(rewardParams);
+        topLine.addView(rewardView);
 
-        row.addView(infoColumn);
+        row.addView(topLine);
 
         // Mesma semântica de tappable do TaskCardAdapter (widget da Home): só
         // pending/rejected podem (re)enviar foto; submitted/approved só mostram status.
@@ -247,7 +385,13 @@ public class LockOverlayService extends Service {
         if (tappable) {
             Button sendPhotoButton = new Button(this);
             sendPhotoButton.setText("📸 Enviar Foto");
-            sendPhotoButton.setTextSize(12);
+            sendPhotoButton.setTextColor(Color.WHITE);
+            sendPhotoButton.setAllCaps(false);
+            sendPhotoButton.setTextSize(13);
+            sendPhotoButton.setBackground(buildAccentGradient(dp(12)));
+            LinearLayout.LayoutParams sendParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            sendParams.topMargin = dp(12);
+            sendPhotoButton.setLayoutParams(sendParams);
             sendPhotoButton.setOnClickListener(v -> startTaskCameraFlow(task.getId()));
             row.addView(sendPhotoButton);
         } else {
@@ -255,6 +399,9 @@ public class LockOverlayService extends Service {
             statusView.setText("approved".equals(status) ? "✅ Aprovada" : "⏳ Aguardando aprovação");
             statusView.setTextColor(Color.parseColor("#94a3b8"));
             statusView.setTextSize(12);
+            LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            statusParams.topMargin = dp(8);
+            statusView.setLayoutParams(statusParams);
             row.addView(statusView);
         }
 
