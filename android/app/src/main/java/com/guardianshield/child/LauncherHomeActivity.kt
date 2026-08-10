@@ -240,6 +240,30 @@ class LauncherHomeActivity : AppCompatActivity() {
         applyThemeColors()
         refreshHomeGrid()
         setupVideoWallpaper()
+        handleTaskCameraIntentExtra(intent)
+    }
+
+    // A Activity é singleTask (ver AndroidManifest), então re-lançamentos (ex: pela
+    // tela de bloqueio, ou por bringGuardianShieldToFront no ParentalAccessibilityService)
+    // caem aqui em vez de recriar a Activity.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleTaskCameraIntentExtra(intent)
+    }
+
+    /**
+     * Disparado pela tela de bloqueio (LockOverlayService.startTaskCameraFlow) quando
+     * a criança toca em "Enviar Foto" numa tarefa pendente — abre a câmera direto pra
+     * essa tarefa, sem precisar navegar até o widget de tarefas da Home (que fica
+     * coberto pela sobreposição de bloqueio enquanto o bloqueio segue ativo). Reusa
+     * launchTaskCamera, a mesma função que o toque num card do widget já usa.
+     */
+    private fun handleTaskCameraIntentExtra(intent: Intent) {
+        intent.getStringExtra("openTaskCameraForId")?.let { taskId ->
+            intent.removeExtra("openTaskCameraForId")
+            launchTaskCamera(taskId)
+        }
     }
 
     override fun onResume() {

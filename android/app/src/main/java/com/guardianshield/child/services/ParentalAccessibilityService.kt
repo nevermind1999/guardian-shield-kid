@@ -291,6 +291,10 @@ class ParentalAccessibilityService : AccessibilityService() {
             // dia — não só Pausa Geral, senão o "nunca mais travar" vira mentira assim
             // que bater o horário de tarefa pendente ou tempo esgotado de novo.
             GuardianPrefs.isPinOverrideActiveToday(this) -> null
+            // Janela curta (poucos minutos) aberta pelo botão "Enviar Foto" da tela de
+            // tarefas pendentes — sem isso, o próprio app de câmera do sistema seria
+            // barrado de volta pra tela de bloqueio assim que abrisse.
+            GuardianPrefs.isTaskSubmissionWindowActive(this) -> null
             GuardianPrefs.isPauseAllActive(this) ->
                 "🔒 DISPOSITIVO BLOQUEADO" to "Pausa Geral Ativa.\nFale com seus pais para liberar o uso."
             GuardianPrefs.isTaskGateBlocking(this) ->
@@ -340,7 +344,10 @@ class ParentalAccessibilityService : AccessibilityService() {
         if (blockReason != null) {
             val (title, message) = blockReason
             Log.w("GuardianShield", "Bloqueio ativo! Forçando sobreposição para $packageName")
-            showOverlay(title, message, allowPinUnlock = true)
+            // O motivo específico "tarefas pendentes" ganha a lista de tarefas + botão
+            // de enviar foto na sobreposição (ver LockOverlayService) — os outros dois
+            // motivos globais (Pausa Geral, tempo esgotado) não têm o que mostrar aqui.
+            showOverlay(title, message, allowPinUnlock = true, allowTaskSubmission = GuardianPrefs.isTaskGateBlocking(this))
             bringGuardianShieldToFront()
             return
         }
@@ -390,12 +397,13 @@ class ParentalAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun showOverlay(title: String, message: String, allowPinUnlock: Boolean) {
+    private fun showOverlay(title: String, message: String, allowPinUnlock: Boolean, allowTaskSubmission: Boolean = false) {
         val overlayIntent = Intent(this, LockOverlayService::class.java)
         overlayIntent.action = "SHOW_OVERLAY"
         overlayIntent.putExtra("title", title)
         overlayIntent.putExtra("message", message)
         overlayIntent.putExtra("allowPinUnlock", allowPinUnlock)
+        overlayIntent.putExtra("allowTaskSubmission", allowTaskSubmission)
         startService(overlayIntent)
     }
 

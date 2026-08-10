@@ -162,6 +162,20 @@ object GuardianPrefs {
         of(context).edit().putBoolean(KEY_PENDING_PIN_UNLOCK_ACK, pending).apply()
     }
 
+    // --- Janela de exceção temporária pro bloqueio, usada só pra deixar a câmera do
+    // sistema abrir sem ser barrada de volta pra tela de bloqueio (ver "Enviar Foto"
+    // na tela de tarefas pendentes, em LockOverlayService). Curta (poucos minutos) e
+    // por tempo, diferente do override do PIN que dura o dia inteiro. ---
+
+    private const val KEY_TASK_SUBMISSION_UNTIL = "taskSubmissionAllowedUntil"
+
+    fun setTaskSubmissionAllowedUntil(context: Context, untilMillis: Long) {
+        of(context).edit().putLong(KEY_TASK_SUBMISSION_UNTIL, untilMillis).apply()
+    }
+
+    fun isTaskSubmissionWindowActive(context: Context): Boolean =
+        System.currentTimeMillis() < of(context).getLong(KEY_TASK_SUBMISSION_UNTIL, 0L)
+
     fun parsedTodayTasks(context: Context): List<TaskItem> {
         val raw = of(context).getString(KEY_TASKS_SYNC_JSON, null) ?: return emptyList()
         return try {

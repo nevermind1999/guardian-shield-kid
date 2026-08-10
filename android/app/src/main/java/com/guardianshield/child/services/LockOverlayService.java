@@ -20,19 +20,27 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.guardianshield.child.LauncherHomeActivity;
 import com.guardianshield.child.util.GuardianPrefs;
 
 import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 
 public class LockOverlayService extends Service {
+    // Janela de exceção temporária pro bloqueio (ver GuardianPrefs.setTaskSubmissionAllowedUntil):
+    // tempo suficiente pra abrir a câmera do sistema, tirar a foto e voltar sem ser
+    // barrado de volta pra essa tela no meio do caminho.
+    private static final long TASK_SUBMISSION_WINDOW_MS = 3 * 60 * 1000L;
+
     private WindowManager windowManager;
     private View overlayView;
     private TextView titleView;
     private TextView subtitleView;
     private EditText pinInputView;
+    private LinearLayout taskListContainer;
     private static boolean isShowing = false;
 
     @Override
@@ -49,10 +57,13 @@ public class LockOverlayService extends Service {
             // de emergência — um app bloqueado individualmente pelo pai continua
             // bloqueado mesmo com o PIN certo (ver showOverlay em ParentalAccessibilityService).
             boolean allowPinUnlock = intent.getBooleanExtra("allowPinUnlock", false);
+            // Só quando o motivo do bloqueio é especificamente "tarefas pendentes".
+            boolean allowTaskSubmission = intent.getBooleanExtra("allowTaskSubmission", false);
             showOverlay(
                 title != null ? title : "🔒 DISPOSITIVO BLOQUEADO",
                 message != null ? message : "Pausa Geral Ativa ou Tempo Limite Esgotado.\nFale com seus pais para liberar o uso.",
-                allowPinUnlock
+                allowPinUnlock,
+                allowTaskSubmission
             );
         } else if (intent != null && "HIDE_OVERLAY".equals(intent.getAction())) {
             hideOverlay();
@@ -60,18 +71,20 @@ public class LockOverlayService extends Service {
         return START_STICKY;
     }
 
-    private void showOverlay(String titleText, String subtitleText, boolean allowPinUnlock) {
+    private void showOverlay(String titleText, String subtitleText, boolean allowPinUnlock, boolean allowTaskSubmission) {
         try {
             boolean showPinField = allowPinUnlock && GuardianPrefs.INSTANCE.hasUnlockPinConfigured(this);
+            boolean showTaskList = allowTaskSubmission && !GuardianPrefs.INSTANCE.parsedTodayTasks(this).isEmpty();
 
             if (isShowing && overlayView != null) {
                 if (titleView != null) titleView.setText(titleText);
                 if (subtitleView != null) subtitleView.setText(subtitleText);
                 // O tipo de bloqueio pode ter mudado (ex: de "app bloqueado" pra "tempo
                 // esgotado") desde a última vez que essa sobreposição foi mostrada — em
-                // vez de tentar adicionar/remover só o campo de PIN, recria a view inteira.
+                // vez de tentar adicionar/remover só os campos extras, recria a view inteira.
                 boolean pinFieldAlreadyShown = pinInputView != null;
-                if (pinFieldAlreadyShown == showPinField) return;
+                boolean taskListAlreadyShown = taskListContainer != null;
+                if (pinFieldAlreadyShown == showPinField && taskListAlreadyShown == showTaskList) return;
                 hideOverlay();
             }
 
@@ -103,6 +116,13 @@ public class LockOverlayService extends Service {
 
             layout.addView(titleView);
             layout.addView(subtitleView);
+
+            if (showTaskList) {
+                taskListContainer = buildTaskListView();
+                layout.addView(taskListContainer);
+            } else {
+                taskListContainer = null;
+            }
 
             if (showPinField) {
                 pinInputView = new EditText(this);
@@ -166,6 +186,98 @@ public class LockOverlayService extends Service {
     }
 
     /**
+     * Lista das tarefas de hoje (GuardianPrefs.parsedTodayTasks — mesma fonte que já
+     * alimenta o widget da Home) com um botão de enviar foto pra quem ainda pode
+     * (pending/rejected). A Home nativa fica coberta por essa sobreposição durante o
+     * bloqueio, então sem isso a criança não tem como ver nem cumprir as tarefas.
+     */
+    private LinearLayout buildTaskListView() {
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams containerParams = new LinearLayout.LayoutParams(340, LinearLayout.LayoutParams.WRAP_CONTENT);
+        containerParams.topMargin = 24;
+        container.setLayoutParams(containerParams);
+
+        for (GuardianPrefs.TaskItem task : GuardianPrefs.INSTANCE.parsedTodayTasks(this)) {
+            container.addView(buildTaskRow(task));
+        }
+        return container;
+    }
+
+    private View buildTaskRow(GuardianPrefs.TaskItem task) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackgroundColor(Color.parseColor("#1e293b"));
+        row.setPadding(20, 16, 20, 16);
+        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        rowParams.bottomMargin = 10;
+        row.setLayoutParams(rowParams);
+
+        TextView iconView = new TextView(this);
+        iconView.setText(task.getIcon());
+        iconView.setTextSize(22);
+        iconView.setPadding(0, 0, 16, 0);
+        row.addView(iconView);
+
+        LinearLayout infoColumn = new LinearLayout(this);
+        infoColumn.setOrientation(LinearLayout.VERTICAL);
+        infoColumn.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView taskTitleView = new TextView(this);
+        taskTitleView.setText(task.getTitle());
+        taskTitleView.setTextColor(Color.WHITE);
+        taskTitleView.setTextSize(15);
+        infoColumn.addView(taskTitleView);
+
+        TextView rewardView = new TextView(this);
+        rewardView.setText("+" + task.getRewardMinutes() + " min");
+        rewardView.setTextColor(Color.parseColor("#64748b"));
+        rewardView.setTextSize(12);
+        infoColumn.addView(rewardView);
+
+        row.addView(infoColumn);
+
+        // Mesma semântica de tappable do TaskCardAdapter (widget da Home): só
+        // pending/rejected podem (re)enviar foto; submitted/approved só mostram status.
+        String status = task.getStatus();
+        boolean tappable = "pending".equals(status) || "rejected".equals(status);
+        if (tappable) {
+            Button sendPhotoButton = new Button(this);
+            sendPhotoButton.setText("📸 Enviar Foto");
+            sendPhotoButton.setTextSize(12);
+            sendPhotoButton.setOnClickListener(v -> startTaskCameraFlow(task.getId()));
+            row.addView(sendPhotoButton);
+        } else {
+            TextView statusView = new TextView(this);
+            statusView.setText("approved".equals(status) ? "✅ Aprovada" : "⏳ Aguardando aprovação");
+            statusView.setTextColor(Color.parseColor("#94a3b8"));
+            statusView.setTextSize(12);
+            row.addView(statusView);
+        }
+
+        return row;
+    }
+
+    /**
+     * Abre a janela de exceção temporária (pra não barrar o app de câmera do sistema
+     * de volta pra essa tela) e manda a Home nativa disparar a câmera pra essa tarefa
+     * específica — LauncherHomeActivity já tem toda a lógica de captura/envio pronta
+     * (launchTaskCamera/submitTaskPhoto, usada normalmente pelo widget da Home), essa
+     * extra só aciona o mesmo fluxo sem precisar duplicar nada.
+     */
+    private void startTaskCameraFlow(String taskId) {
+        GuardianPrefs.INSTANCE.setTaskSubmissionAllowedUntil(this, System.currentTimeMillis() + TASK_SUBMISSION_WINDOW_MS);
+        hideOverlay();
+        Intent intent = new Intent(this, LauncherHomeActivity.class);
+        intent.putExtra("openTaskCameraForId", taskId);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        startActivity(intent);
+    }
+
+    /**
      * Confere o PIN digitado contra o hash sincronizado do backend (GuardianPrefs,
      * gravado pelo poll de regras — ver ParentalAccessibilityService.pollRulesSync).
      * A checagem é 100% local: nenhuma chamada de rede acontece aqui, por isso
@@ -217,6 +329,7 @@ public class LockOverlayService extends Service {
             titleView = null;
             subtitleView = null;
             pinInputView = null;
+            taskListContainer = null;
             isShowing = false;
         }
     }
