@@ -9,11 +9,13 @@ import android.os.PowerManager
 import android.view.accessibility.AccessibilityEvent
 import android.util.Log
 import com.guardianshield.child.LauncherHomeActivity
+import com.guardianshield.child.util.AppRepository
 import com.guardianshield.child.util.GuardianPrefs
 import com.guardianshield.child.util.ServerConfig
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
+import org.json.JSONArray
 import org.json.JSONObject
 
 class ParentalAccessibilityService : AccessibilityService() {
@@ -25,19 +27,30 @@ class ParentalAccessibilityService : AccessibilityService() {
     // roda numa thread própria pra nunca bloquear a main thread do tick.
     private val networkExecutor = Executors.newSingleThreadExecutor()
 
+    // Último pacote visto em primeiro plano (atualizado em onAccessibilityEvent) — usado
+    // pelo ticker pra reavaliar o bloqueio do app atual mesmo sem um novo evento de troca
+    // de janela (ex: a criança fica parada olhando a tela de bloqueio de um app que acabou
+    // de ser desbloqueado pelo pai; sem isso, nada disparava a reavaliação).
+    private var lastForegroundPackage: String? = null
+
+    // Conta os ticks de 1min pra disparar o envio da lista de apps instalados só a cada
+    // ~5min (ela muda raramente, não precisa ir a cada ciclo de 60s como o resto).
+    private var tickCount = 0
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         startUsageTicker()
     }
 
     /**
-     * Contador de tempo de tela + sincronização de tarefas: este serviço é o único
+     * Contador de tempo de tela + sincronização de regras/tarefas: este serviço é o único
      * componente do app que fica vivo o tempo todo (a WebView/React só existe quando a
      * criança abre as Configurações, e a Home nativa pode ser destruída pelo sistema) —
      * por isso é aqui, e não no JS, que o "usado hoje" precisa ser contado de verdade e
-     * as tarefas precisam ser sincronizadas com o backend. A cada minuto: se a tela
-     * estiver ligada, soma 1 minuto e reavalia o bloqueio; sempre, dispara um poll de
-     * tarefas em background.
+     * as regras do pai (pausa geral, apps bloqueados, limite diário, tarefas) precisam
+     * ser sincronizadas com o backend. A cada minuto: se a tela estiver ligada, soma 1
+     * minuto; sempre, reavalia o bloqueio do app atual e dispara um poll em background
+     * (a cada ~5 ciclos, o poll também reenvia a lista real de apps instalados).
      */
     private fun startUsageTicker() {
         tickRunnable?.let { tickHandler.removeCallbacks(it) }
@@ -56,25 +69,27 @@ class ParentalAccessibilityService : AccessibilityService() {
         val screenOn = powerManager?.isInteractive ?: true
         if (screenOn) {
             GuardianPrefs.incrementUsedMinutesToday(this)
-            // Reavalia o bloqueio mesmo com um app já aberto: cobre o caso do tempo
-            // acabar ou o gate de tarefas passar a valer no meio de uma sessão de uso.
-            currentBlockReason()?.let { (title, message) ->
-                Log.w("GuardianShield", "Bloqueio disparado pelo ticker: $title")
-                showOverlay(title, message)
-                bringGuardianShieldToFront()
-            }
         }
-        networkExecutor.execute { pollTaskSync() }
+        // Reavalia o bloqueio (geral + app atual) a cada ciclo, não só quando a janela
+        // em 1º plano muda — cobre tempo esgotar, tarefa pendente, bloqueio/desbloqueio
+        // de um app específico ou da Pausa Geral enquanto a criança fica parada no mesmo app.
+        reevaluateBlockState()
+
+        tickCount++
+        networkExecutor.execute {
+            pollRulesSync()
+            if (tickCount % 5 == 0) postInstalledApps()
+        }
     }
 
     /**
      * GET /api/tasks/sync no backend, tentando os mesmos candidatos de servidor usados
      * pela WebView (SERVER_URLS em App.jsx) — o nativo mantém sua própria lista porque
-     * não compartilha o cliente socket.io dela. Grava o resultado em GuardianPrefs; em
-     * caso de falha (sem internet, servidor fora do ar), simplesmente mantém o último
-     * valor conhecido — não há necessidade de tratamento especial de erro aqui.
+     * não compartilha o cliente socket.io dela. Grava tarefas + regras de bloqueio
+     * (pausa geral, apps bloqueados, limite diário) em GuardianPrefs; em caso de falha
+     * (sem internet, servidor fora do ar), simplesmente mantém o último valor conhecido.
      */
-    private fun pollTaskSync() {
+    private fun pollRulesSync() {
         for (baseUrl in ServerConfig.SERVER_URL_CANDIDATES) {
             try {
                 val connection = URL("$baseUrl/api/tasks/sync").openConnection() as HttpURLConnection
@@ -84,21 +99,65 @@ class ParentalAccessibilityService : AccessibilityService() {
                 if (connection.responseCode == 200) {
                     val body = connection.inputStream.bufferedReader().use { it.readText() }
                     val json = JSONObject(body)
-                    GuardianPrefs.saveTasksSync(
+                    val blockedPackagesArray = json.optJSONArray("blockedPackages") ?: JSONArray()
+                    val blockedPackages = (0 until blockedPackagesArray.length())
+                        .map { blockedPackagesArray.getString(it) }
+                        .toSet()
+                    GuardianPrefs.saveRulesSync(
                         this,
                         unlockMode = json.optString("unlockMode", "off"),
                         dailyLimitMinutes = json.optInt("dailyLimitMinutes", GuardianPrefs.dailyLimitMinutes(this)),
-                        rawJson = body
+                        isPauseAllActive = json.optBoolean("isPauseAllActive", false),
+                        blockedPackages = blockedPackages,
+                        rawTasksJson = body
                     )
                     // Deixa em cache pra LauncherHomeActivity tentar este endereço primeiro
                     // ao enviar uma foto, em vez de percorrer todos os candidatos de novo.
+                    GuardianPrefs.setLastWorkingServerUrl(this, baseUrl)
+                    connection.disconnect()
+                    // As regras acabaram de mudar (ou foram confirmadas) — reavalia de
+                    // novo pra refletir na hora, sem esperar o próximo tick de 1min.
+                    tickHandler.post { reevaluateBlockState() }
+                    return
+                }
+                connection.disconnect()
+            } catch (e: Exception) {
+                // Tenta o próximo candidato; se nenhum responder, mantém o cache antigo.
+            }
+        }
+    }
+
+    /**
+     * POST /api/device/apps-sync com a lista real de apps instalados (mesma fonte que já
+     * alimenta a Home/Gaveta nativas via AppRepository) — antes essa lista só chegava ao
+     * backend quando a WebView mandava telemetria, e a WebView raramente abre no uso normal.
+     */
+    private fun postInstalledApps() {
+        val apps = AppRepository.loadLaunchableApps(this)
+        val appsArray = JSONArray()
+        for (app in apps) {
+            appsArray.put(JSONObject().put("package", app.packageName).put("name", app.label))
+        }
+        val body = JSONObject().put("installedApps", appsArray).toString()
+
+        val candidates = (listOfNotNull(GuardianPrefs.lastWorkingServerUrl(this)) + ServerConfig.SERVER_URL_CANDIDATES).distinct()
+        for (baseUrl in candidates) {
+            try {
+                val connection = URL("$baseUrl/api/device/apps-sync").openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.connectTimeout = 5_000
+                connection.readTimeout = 5_000
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                if (connection.responseCode == 200) {
                     GuardianPrefs.setLastWorkingServerUrl(this, baseUrl)
                     connection.disconnect()
                     return
                 }
                 connection.disconnect()
             } catch (e: Exception) {
-                // Tenta o próximo candidato; se nenhum responder, mantém o cache antigo.
+                // Tenta o próximo candidato; se nenhum responder, tenta de novo no próximo ciclo.
             }
         }
     }
@@ -132,35 +191,49 @@ class ParentalAccessibilityService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            val blockReason = currentBlockReason()
-            val blockedPackagesSet = GuardianPrefs.blockedPackages(this)
+            lastForegroundPackage = packageName
+            reevaluateBlockState()
+        }
+    }
 
-            Log.d("GuardianShield", "App em 1º plano: $packageName | Bloqueio: ${blockReason?.first ?: "nenhum"} | Bloqueados: $blockedPackagesSet")
+    /**
+     * Decide se o app atualmente em 1º plano (lastForegroundPackage) deve estar bloqueado
+     * e mostra/esconde a sobreposição de acordo. Chamado tanto por eventos reais de troca
+     * de janela quanto pelo ticker de 1min — o ticker é o que garante que um desbloqueio
+     * (ou bloqueio) decidido pelo pai enquanto a criança fica parada no mesmo app (sem
+     * gerar novo evento de acessibilidade) seja detectado mesmo assim.
+     */
+    private fun reevaluateBlockState() {
+        val packageName = lastForegroundPackage ?: return
+        if (packageName == "com.guardianshield.child") return
 
-            // 1. Se algum motivo global estiver bloqueando (Pausa Geral, tarefas pendentes
-            // ou tempo esgotado), nenhum app pode ser aberto (exceto o próprio Guardian Shield)
-            if (blockReason != null) {
-                if (packageName != "com.guardianshield.child") {
-                    val (title, message) = blockReason
-                    Log.w("GuardianShield", "Bloqueio ativo! Forçando sobreposição para $packageName")
-                    showOverlay(title, message)
-                    bringGuardianShieldToFront()
-                }
-                return
-            }
+        val blockReason = currentBlockReason()
+        val blockedPackagesSet = GuardianPrefs.blockedPackages(this)
 
-            // 2. Sem bloqueio global, verifica se o aplicativo em 1º plano está bloqueado individualmente
-            val isBlocked = blockedPackagesSet.contains(packageName) || isPackageBlockedFallback(packageName, blockedPackagesSet)
+        Log.d("GuardianShield", "App em 1º plano: $packageName | Bloqueio: ${blockReason?.first ?: "nenhum"} | Bloqueados: $blockedPackagesSet")
 
-            if (isBlocked && packageName != "com.guardianshield.child") {
-                Log.w("GuardianShield", "App Bloqueado Detectado: $packageName. Exibindo tela de bloqueio do app!")
-                val appLabel = getAppNameFromPackage(packageName)
-                showOverlay("🔒 APLICATIVO BLOQUEADO", "O aplicativo $appLabel foi bloqueado pelos seus pais.")
-                bringGuardianShieldToFront()
-            } else if (packageName != "com.guardianshield.child") {
-                // Se um aplicativo permitido (ou tela inicial) está em 1º plano, remove a sobreposição se estiver visível
-                hideOverlay()
-            }
+        // 1. Se algum motivo global estiver bloqueando (Pausa Geral, tarefas pendentes
+        // ou tempo esgotado), nenhum app pode ser aberto (exceto o próprio Guardian Shield)
+        if (blockReason != null) {
+            val (title, message) = blockReason
+            Log.w("GuardianShield", "Bloqueio ativo! Forçando sobreposição para $packageName")
+            showOverlay(title, message)
+            bringGuardianShieldToFront()
+            return
+        }
+
+        // 2. Sem bloqueio global, verifica se o aplicativo em 1º plano está bloqueado individualmente
+        val isBlocked = blockedPackagesSet.contains(packageName) || isPackageBlockedFallback(packageName, blockedPackagesSet)
+
+        if (isBlocked) {
+            Log.w("GuardianShield", "App Bloqueado Detectado: $packageName. Exibindo tela de bloqueio do app!")
+            val appLabel = getAppNameFromPackage(packageName)
+            showOverlay("🔒 APLICATIVO BLOQUEADO", "O aplicativo $appLabel foi bloqueado pelos seus pais.")
+            bringGuardianShieldToFront()
+        } else {
+            // App permitido (ou o bloqueio acabou de ser removido pelo pai) — remove a
+            // sobreposição se estiver visível.
+            hideOverlay()
         }
     }
 

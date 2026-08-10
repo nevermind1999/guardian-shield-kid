@@ -79,13 +79,17 @@ object GuardianPrefs {
         }
     }
 
-    // --- Tarefas diárias com aprovação por foto: o backend é a fonte da verdade (o pai
-    // edita a lista e aprova/recusa pelo app dele). O nativo NÃO tem cliente socket.io
-    // (só a WebView tem, e ela raramente está aberta) — por isso o ParentalAccessibilityService
-    // consulta GET /api/tasks/sync por HTTP simples a cada ciclo do seu ticker e grava o
-    // resultado cru aqui. A Home nativa e o próprio serviço leem só daqui, nunca da rede
-    // diretamente, então continuam funcionando com o último valor conhecido mesmo se o
-    // próximo poll falhar (sem internet, servidor fora do ar, etc). ---
+    // --- Tarefas diárias + regras de bloqueio (pausa geral, apps bloqueados, limite diário):
+    // o backend é a fonte da verdade (o pai edita tudo isso pelo app dele). O nativo NÃO tem
+    // cliente socket.io (só a WebView tem, e ela raramente está aberta — a criança usa a
+    // Home/Gaveta nativas no dia a dia) — por isso o ParentalAccessibilityService consulta
+    // GET /api/tasks/sync por HTTP simples a cada ciclo do seu ticker (~60s) e grava o
+    // resultado aqui, pra tudo isso valer mesmo se a criança nunca abrir a WebView. A Home
+    // nativa e o próprio serviço leem só daqui, nunca da rede diretamente, então continuam
+    // funcionando com o último valor conhecido mesmo se o próximo poll falhar (sem internet,
+    // servidor fora do ar, etc). A WebView também grava essas mesmas chaves quando está
+    // aberta (ver MainActivity.PauseModule) — os dois caminhos escrevem os mesmos valores
+    // que o backend manda, então não há conflito entre eles. ---
 
     private const val KEY_TASK_UNLOCK_MODE = "taskUnlockMode"
     private const val KEY_TASKS_SYNC_JSON = "tasksSyncJson"
@@ -104,18 +108,25 @@ object GuardianPrefs {
 
     /**
      * Chamado só pelo poll do ParentalAccessibilityService, depois de um GET /api/tasks/sync
-     * bem-sucedido. No modo "earn" também atualiza dailyLimitMinutes (é o backend quem
-     * calcula a soma das tarefas aprovadas); nos outros modos não mexe nesse valor, pra não
-     * pisar a configuração manual do pai.
+     * bem-sucedido — grava de uma vez tudo que o backend manda: tarefas, limite diário
+     * (o backend já calcula o valor efetivo certo pra cada modo, então pode gravar sempre,
+     * sem condicional), pausa geral e apps bloqueados individualmente.
      */
-    fun saveTasksSync(context: Context, unlockMode: String, dailyLimitMinutes: Int, rawJson: String) {
-        val editor = of(context).edit()
+    fun saveRulesSync(
+        context: Context,
+        unlockMode: String,
+        dailyLimitMinutes: Int,
+        isPauseAllActive: Boolean,
+        blockedPackages: Set<String>,
+        rawTasksJson: String
+    ) {
+        of(context).edit()
             .putString(KEY_TASK_UNLOCK_MODE, unlockMode)
-            .putString(KEY_TASKS_SYNC_JSON, rawJson)
-        if (unlockMode == "earn") {
-            editor.putInt("dailyLimitMinutes", dailyLimitMinutes)
-        }
-        editor.apply()
+            .putString(KEY_TASKS_SYNC_JSON, rawTasksJson)
+            .putInt("dailyLimitMinutes", dailyLimitMinutes)
+            .putBoolean("isPauseAllActive", isPauseAllActive)
+            .putStringSet("blockedPackagesSet", blockedPackages)
+            .apply()
     }
 
     fun parsedTodayTasks(context: Context): List<TaskItem> {
