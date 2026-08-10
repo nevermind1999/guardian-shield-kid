@@ -330,7 +330,15 @@ class ParentalAccessibilityService : AccessibilityService() {
      */
     private fun reevaluateBlockState() {
         val packageName = lastForegroundPackage ?: return
-        if (packageName == "com.guardianshield.child") return
+        // A Home/Gaveta nativas (pacote do próprio GuardianShield) continuam sendo o
+        // "lugar seguro" durante Pausa Geral/tempo esgotado (comportamento original) —
+        // mas NÃO enquanto houver tarefa pendente/rejeitada: sem essa exceção, a
+        // criança conseguia simplesmente ficar parada na Home ignorando uma tarefa
+        // rejeitada pra sempre, sem nunca ver o aviso de novo (só reaparecia se ela
+        // tentasse abrir outro app). Isso também é o que fecha a sobreposição de volta
+        // assim que a criança volta da câmera com uma foto (ver launchTaskCamera):
+        // ela some na hora do envio, mas essa checagem traz de volta no próximo evento.
+        if (packageName == "com.guardianshield.child" && !GuardianPrefs.isTaskGateBlocking(this)) return
 
         val blockReason = currentBlockReason()
         val blockedPackagesSet = GuardianPrefs.blockedPackages(this)

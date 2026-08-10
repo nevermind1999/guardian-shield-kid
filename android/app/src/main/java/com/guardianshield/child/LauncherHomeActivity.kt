@@ -105,6 +105,13 @@ class LauncherHomeActivity : AppCompatActivity() {
     private val taskSubmitExecutor = Executors.newSingleThreadExecutor()
 
     private val takeTaskPhotoLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        // De volta da câmera (com foto ou cancelado) — a janela de exceção do bloqueio
+        // (GuardianPrefs.setTaskSubmissionAllowedUntil, aberta pela tela de bloqueio em
+        // LockOverlayService.startTaskCameraFlow) só existia pra deixar o app de câmera
+        // abrir sem ser barrado de volta. Encerra na hora, em vez de esperar o tempo
+        // máximo (3min) passar sozinho — enviar a foto NÃO aprova a tarefa, só manda
+        // pro pai revisar, então o bloqueio deve voltar a valer imediatamente.
+        GuardianPrefs.setTaskSubmissionAllowedUntil(this, 0L)
         val taskId = pendingPhotoTaskId
         val uri = pendingPhotoUri
         pendingPhotoTaskId = null
