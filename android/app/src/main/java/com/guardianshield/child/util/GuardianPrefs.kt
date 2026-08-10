@@ -118,15 +118,48 @@ object GuardianPrefs {
         dailyLimitMinutes: Int,
         isPauseAllActive: Boolean,
         blockedPackages: Set<String>,
+        unlockPinHash: String?,
         rawTasksJson: String
     ) {
-        of(context).edit()
+        val editor = of(context).edit()
             .putString(KEY_TASK_UNLOCK_MODE, unlockMode)
             .putString(KEY_TASKS_SYNC_JSON, rawTasksJson)
             .putInt("dailyLimitMinutes", dailyLimitMinutes)
             .putBoolean("isPauseAllActive", isPauseAllActive)
             .putStringSet("blockedPackagesSet", blockedPackages)
-            .apply()
+        if (unlockPinHash != null) editor.putString(KEY_UNLOCK_PIN_HASH, unlockPinHash) else editor.remove(KEY_UNLOCK_PIN_HASH)
+        editor.apply()
+    }
+
+    // --- PIN de emergência: desbloqueia o aparelho mesmo sem internet ---
+    // Só o hash SHA-256 chega até aqui (sincronizado pelo poll acima, nunca o valor em
+    // texto puro) — LockOverlayService compara o hash do que a criança digitou contra
+    // isto, 100% localmente. Quando bate, marca "hoje" como um dia com override: o
+    // aparelho fica liberado (Pausa Geral, tarefas pendentes e tempo esgotado, todos)
+    // até a virada da data local, sem precisar de rede pra isso valer nem pra expirar.
+
+    private const val KEY_UNLOCK_PIN_HASH = "unlockPinHash"
+    private const val KEY_PIN_OVERRIDE_DATE = "pinOverrideDate"
+    private const val KEY_PENDING_PIN_UNLOCK_ACK = "pendingPinUnlockAck"
+
+    fun unlockPinHash(context: Context): String? = of(context).getString(KEY_UNLOCK_PIN_HASH, null)
+
+    fun hasUnlockPinConfigured(context: Context): Boolean = !unlockPinHash(context).isNullOrEmpty()
+
+    fun setPinOverrideDate(context: Context, date: String) {
+        of(context).edit().putString(KEY_PIN_OVERRIDE_DATE, date).apply()
+    }
+
+    fun isPinOverrideActiveToday(context: Context): Boolean {
+        val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+        return of(context).getString(KEY_PIN_OVERRIDE_DATE, null) == today
+    }
+
+    /** Fica true entre um desbloqueio local por PIN e a confirmação bem-sucedida pro backend. */
+    fun pendingPinUnlockAck(context: Context): Boolean = of(context).getBoolean(KEY_PENDING_PIN_UNLOCK_ACK, false)
+
+    fun setPendingPinUnlockAck(context: Context, pending: Boolean) {
+        of(context).edit().putBoolean(KEY_PENDING_PIN_UNLOCK_ACK, pending).apply()
     }
 
     fun parsedTodayTasks(context: Context): List<TaskItem> {

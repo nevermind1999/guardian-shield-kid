@@ -6,5 +6,8 @@ import android.graphics.drawable.Drawable
 data class AppEntry(
     val packageName: String,
     val label: String,
-    val icon: Drawable
+    val icon: Drawable,
+    // "Sistema" | "Jogos" | "Aplicativos" — ver AppRepository.loadLaunchableApps.
+    // Usado pelo app do pai para agrupar a lista de apps instalados por categoria.
+    val category: String = "Aplicativos"
 )

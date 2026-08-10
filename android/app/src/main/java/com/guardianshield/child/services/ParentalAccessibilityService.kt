@@ -1,8 +1,14 @@
 package com.guardianshield.child.services
 
+import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -14,6 +20,8 @@ import com.guardianshield.child.util.GuardianPrefs
 import com.guardianshield.child.util.ServerConfig
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Locale
 import java.util.concurrent.Executors
 import org.json.JSONArray
 import org.json.JSONObject
@@ -77,8 +85,13 @@ class ParentalAccessibilityService : AccessibilityService() {
 
         tickCount++
         networkExecutor.execute {
-            pollRulesSync()
+            val forceFreshLocation = pollRulesSync()
             if (tickCount % 5 == 0) postInstalledApps()
+            if (GuardianPrefs.pendingPinUnlockAck(this)) ackPinUnlock()
+            // Localização a cada ciclo (60s) — bem mais fresco que antes, quando só
+            // atualizava se a WebView estivesse aberta. forceFreshLocation vem de um
+            // pedido de "Forçar Atualização" do pai (ver locationUpdateRequested).
+            fetchLocationAndReport(forceFreshLocation)
         }
     }
 
@@ -86,10 +99,11 @@ class ParentalAccessibilityService : AccessibilityService() {
      * GET /api/tasks/sync no backend, tentando os mesmos candidatos de servidor usados
      * pela WebView (SERVER_URLS em App.jsx) — o nativo mantém sua própria lista porque
      * não compartilha o cliente socket.io dela. Grava tarefas + regras de bloqueio
-     * (pausa geral, apps bloqueados, limite diário) em GuardianPrefs; em caso de falha
-     * (sem internet, servidor fora do ar), simplesmente mantém o último valor conhecido.
+     * (pausa geral, apps bloqueados, limite diário, PIN de emergência) em GuardianPrefs;
+     * em caso de falha (sem internet, servidor fora do ar), mantém o último valor
+     * conhecido. Retorna se o pai pediu uma atualização de GPS forçada nesse ciclo.
      */
-    private fun pollRulesSync() {
+    private fun pollRulesSync(): Boolean {
         for (baseUrl in ServerConfig.SERVER_URL_CANDIDATES) {
             try {
                 val connection = URL("$baseUrl/api/tasks/sync").openConnection() as HttpURLConnection
@@ -109,6 +123,7 @@ class ParentalAccessibilityService : AccessibilityService() {
                         dailyLimitMinutes = json.optInt("dailyLimitMinutes", GuardianPrefs.dailyLimitMinutes(this)),
                         isPauseAllActive = json.optBoolean("isPauseAllActive", false),
                         blockedPackages = blockedPackages,
+                        unlockPinHash = if (json.isNull("unlockPinHash")) null else json.optString("unlockPinHash", null),
                         rawTasksJson = body
                     )
                     // Deixa em cache pra LauncherHomeActivity tentar este endereço primeiro
@@ -118,13 +133,44 @@ class ParentalAccessibilityService : AccessibilityService() {
                     // As regras acabaram de mudar (ou foram confirmadas) — reavalia de
                     // novo pra refletir na hora, sem esperar o próximo tick de 1min.
                     tickHandler.post { reevaluateBlockState() }
-                    return
+                    return json.optBoolean("locationUpdateRequested", false)
                 }
                 connection.disconnect()
             } catch (e: Exception) {
                 // Tenta o próximo candidato; se nenhum responder, mantém o cache antigo.
             }
         }
+        return false
+    }
+
+    /**
+     * POST JSON num dos candidatos de servidor, tentando primeiro o último que
+     * funcionou (cache em GuardianPrefs) antes de percorrer a lista toda de novo.
+     * Compartilhado por apps-sync, location-sync e pin-unlock-ack. Retorna se algum
+     * candidato respondeu 200.
+     */
+    private fun postJson(path: String, jsonBody: String): Boolean {
+        val candidates = (listOfNotNull(GuardianPrefs.lastWorkingServerUrl(this)) + ServerConfig.SERVER_URL_CANDIDATES).distinct()
+        for (baseUrl in candidates) {
+            try {
+                val connection = URL("$baseUrl$path").openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.connectTimeout = 5_000
+                connection.readTimeout = 5_000
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.outputStream.use { it.write(jsonBody.toByteArray(Charsets.UTF_8)) }
+                if (connection.responseCode == 200) {
+                    GuardianPrefs.setLastWorkingServerUrl(this, baseUrl)
+                    connection.disconnect()
+                    return true
+                }
+                connection.disconnect()
+            } catch (e: Exception) {
+                // Tenta o próximo candidato; se nenhum responder, tenta de novo no próximo ciclo.
+            }
+        }
+        return false
     }
 
     /**
@@ -136,40 +182,115 @@ class ParentalAccessibilityService : AccessibilityService() {
         val apps = AppRepository.loadLaunchableApps(this)
         val appsArray = JSONArray()
         for (app in apps) {
-            appsArray.put(JSONObject().put("package", app.packageName).put("name", app.label))
+            appsArray.put(
+                JSONObject()
+                    .put("package", app.packageName)
+                    .put("name", app.label)
+                    .put("category", app.category)
+            )
         }
-        val body = JSONObject().put("installedApps", appsArray).toString()
-
-        val candidates = (listOfNotNull(GuardianPrefs.lastWorkingServerUrl(this)) + ServerConfig.SERVER_URL_CANDIDATES).distinct()
-        for (baseUrl in candidates) {
-            try {
-                val connection = URL("$baseUrl/api/device/apps-sync").openConnection() as HttpURLConnection
-                connection.requestMethod = "POST"
-                connection.doOutput = true
-                connection.connectTimeout = 5_000
-                connection.readTimeout = 5_000
-                connection.setRequestProperty("Content-Type", "application/json")
-                connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-                if (connection.responseCode == 200) {
-                    GuardianPrefs.setLastWorkingServerUrl(this, baseUrl)
-                    connection.disconnect()
-                    return
-                }
-                connection.disconnect()
-            } catch (e: Exception) {
-                // Tenta o próximo candidato; se nenhum responder, tenta de novo no próximo ciclo.
-            }
-        }
+        postJson("/api/device/apps-sync", JSONObject().put("installedApps", appsArray).toString())
     }
 
     /**
-     * Motivo atual de bloqueio do aparelho, na prioridade Pausa Geral > Tarefas pendentes >
-     * Tempo esgotado — usado tanto pelo ticker (pra travar um app já aberto quando o motivo
-     * muda no meio da sessão) quanto pelo onAccessibilityEvent (pra decidir travar antes de
-     * um app abrir). Retorna null se nada estiver bloqueando.
+     * Ack de um desbloqueio local por PIN (ver currentBlockReason/pinOverrideDate) —
+     * avisa o backend que o aparelho já foi liberado de verdade, pra o painel do pai
+     * não continuar mostrando "Pausa Geral Ativa" quando na prática já foi resolvido.
+     * Só limpa a flag local se o ack for confirmado; se a rede cair de novo no meio
+     * do caminho, tenta de novo no próximo ciclo.
+     */
+    private fun ackPinUnlock() {
+        if (postJson("/api/device/pin-unlock-ack", "{}")) {
+            GuardianPrefs.setPendingPinUnlockAck(this, false)
+        }
+    }
+
+    private fun hasLocationPermission(): Boolean =
+        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Busca a posição atual e reporta pro backend — a cada tick normal usa a última
+     * posição em cache (barato, não acorda o GPS); quando `forceFresh` (pedido de
+     * "Forçar Atualização" do pai) ou não há nada em cache ainda, busca uma leitura
+     * ativa de verdade via requestSingleUpdate.
+     */
+    private fun fetchLocationAndReport(forceFresh: Boolean) {
+        if (!hasLocationPermission()) return
+        val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+
+        if (!forceFresh) {
+            val cached = bestLastKnownLocation(lm)
+            if (cached != null) {
+                postLocation(cached)
+                return
+            }
+        }
+        requestFreshLocationOnce(lm)
+    }
+
+    private fun bestLastKnownLocation(lm: LocationManager): Location? {
+        return listOf(LocationManager.NETWORK_PROVIDER, LocationManager.GPS_PROVIDER)
+            .mapNotNull { provider ->
+                try {
+                    if (lm.isProviderEnabled(provider)) lm.getLastKnownLocation(provider) else null
+                } catch (e: SecurityException) {
+                    null
+                }
+            }
+            .maxByOrNull { it.time }
+    }
+
+    /** Pede uma leitura de GPS/rede ativa (não só cache) — usa o looper principal pra receber o callback. */
+    private fun requestFreshLocationOnce(lm: LocationManager) {
+        val provider = when {
+            lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER) -> LocationManager.NETWORK_PROVIDER
+            lm.isProviderEnabled(LocationManager.GPS_PROVIDER) -> LocationManager.GPS_PROVIDER
+            else -> return
+        }
+        val listener = object : LocationListener {
+            override fun onLocationChanged(location: Location) {
+                lm.removeUpdates(this)
+                // O callback chega no looper principal (passado abaixo) — a chamada de
+                // rede em postLocation precisa sair da main thread.
+                networkExecutor.execute { postLocation(location) }
+            }
+            @Deprecated("Deprecated in Java") override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+            override fun onProviderEnabled(provider: String) {}
+            override fun onProviderDisabled(provider: String) {}
+        }
+        try {
+            lm.requestSingleUpdate(provider, listener, Looper.getMainLooper())
+            // Timeout de segurança: se não vier fix em 10s, desiste (tenta de novo no
+            // próximo tick de 60s) em vez de deixar o listener pendurado pra sempre.
+            tickHandler.postDelayed({ lm.removeUpdates(listener) }, 10_000L)
+        } catch (e: SecurityException) {
+            // Permissão negada em runtime apesar do manifesto — ignora.
+        }
+    }
+
+    private fun postLocation(location: Location) {
+        val body = JSONObject()
+            .put("latitude", location.latitude)
+            .put("longitude", location.longitude)
+            .put("accuracy", location.accuracy.toDouble())
+            .toString()
+        postJson("/api/device/location-sync", body)
+    }
+
+    /**
+     * Motivo atual de bloqueio do aparelho, na prioridade PIN de emergência > Pausa Geral >
+     * Tarefas pendentes > Tempo esgotado — usado tanto pelo ticker (pra travar um app já
+     * aberto quando o motivo muda no meio da sessão) quanto pelo onAccessibilityEvent (pra
+     * decidir travar antes de um app abrir). Retorna null se nada estiver bloqueando.
      */
     private fun currentBlockReason(): Pair<String, String>? {
         return when {
+            // Válvula de emergência: se a criança (ou o pai) digitou o PIN certo na
+            // tela de bloqueio hoje, suspende TODOS os motivos abaixo até a virada do
+            // dia — não só Pausa Geral, senão o "nunca mais travar" vira mentira assim
+            // que bater o horário de tarefa pendente ou tempo esgotado de novo.
+            GuardianPrefs.isPinOverrideActiveToday(this) -> null
             GuardianPrefs.isPauseAllActive(this) ->
                 "🔒 DISPOSITIVO BLOQUEADO" to "Pausa Geral Ativa.\nFale com seus pais para liberar o uso."
             GuardianPrefs.isTaskGateBlocking(this) ->
@@ -213,22 +334,27 @@ class ParentalAccessibilityService : AccessibilityService() {
         Log.d("GuardianShield", "App em 1º plano: $packageName | Bloqueio: ${blockReason?.first ?: "nenhum"} | Bloqueados: $blockedPackagesSet")
 
         // 1. Se algum motivo global estiver bloqueando (Pausa Geral, tarefas pendentes
-        // ou tempo esgotado), nenhum app pode ser aberto (exceto o próprio Guardian Shield)
+        // ou tempo esgotado), nenhum app pode ser aberto (exceto o próprio Guardian Shield).
+        // allowPinUnlock=true aqui: é exatamente esse tipo de bloqueio que o PIN de
+        // emergência resolve (ver currentBlockReason).
         if (blockReason != null) {
             val (title, message) = blockReason
             Log.w("GuardianShield", "Bloqueio ativo! Forçando sobreposição para $packageName")
-            showOverlay(title, message)
+            showOverlay(title, message, allowPinUnlock = true)
             bringGuardianShieldToFront()
             return
         }
 
-        // 2. Sem bloqueio global, verifica se o aplicativo em 1º plano está bloqueado individualmente
+        // 2. Sem bloqueio global, verifica se o aplicativo em 1º plano está bloqueado
+        // individualmente. allowPinUnlock=false aqui: o PIN de emergência é pra
+        // destravar o aparelho, não pra liberar um app específico que o pai escolheu
+        // bloquear de propósito (ver currentBlockReason, que não olha pra isso).
         val isBlocked = blockedPackagesSet.contains(packageName) || isPackageBlockedFallback(packageName, blockedPackagesSet)
 
         if (isBlocked) {
             Log.w("GuardianShield", "App Bloqueado Detectado: $packageName. Exibindo tela de bloqueio do app!")
             val appLabel = getAppNameFromPackage(packageName)
-            showOverlay("🔒 APLICATIVO BLOQUEADO", "O aplicativo $appLabel foi bloqueado pelos seus pais.")
+            showOverlay("🔒 APLICATIVO BLOQUEADO", "O aplicativo $appLabel foi bloqueado pelos seus pais.", allowPinUnlock = false)
             bringGuardianShieldToFront()
         } else {
             // App permitido (ou o bloqueio acabou de ser removido pelo pai) — remove a
@@ -264,11 +390,12 @@ class ParentalAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun showOverlay(title: String, message: String) {
+    private fun showOverlay(title: String, message: String, allowPinUnlock: Boolean) {
         val overlayIntent = Intent(this, LockOverlayService::class.java)
         overlayIntent.action = "SHOW_OVERLAY"
         overlayIntent.putExtra("title", title)
         overlayIntent.putExtra("message", message)
+        overlayIntent.putExtra("allowPinUnlock", allowPinUnlock)
         startService(overlayIntent)
     }
 

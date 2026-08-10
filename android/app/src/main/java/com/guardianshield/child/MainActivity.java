@@ -354,6 +354,7 @@ public class MainActivity extends BridgeActivity {
                 JSObject obj = new JSObject();
                 obj.put("packageName", app.getPackageName());
                 obj.put("label", app.getLabel());
+                obj.put("category", app.getCategory());
                 result.put(obj);
             }
             JSObject ret = new JSObject();

@@ -359,7 +359,7 @@ export default function App() {
         location: realLocation,
         // Lista real do aparelho (ver efeito 2b acima) — antes era um array fixo de
         // 5 apps fake que nunca mudava, então o pai nunca via os apps de verdade.
-        installedApps: installedAppsList.map(a => ({ package: a.packageName, name: a.label }))
+        installedApps: installedAppsList.map(a => ({ package: a.packageName, name: a.label, category: a.category }))
       });
     };
 
