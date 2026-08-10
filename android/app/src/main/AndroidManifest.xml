@@ -13,6 +13,11 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- UpdaterModule: instalar o APK de atualização baixado via DownloadManager
+         (não é uma permissão perigosa em tempo de execução — o usuário concede uma
+         vez em Configurações se ainda não tiver permitido "instalar apps desconhecidos"
+         pra este app; ver promptInstallDownloadedUpdate em MainActivity.java). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Foto de comprovação das tarefas diárias (LauncherHomeActivity): usa TakePicture(),
          que delega pro app de câmera do sistema via intent — NÃO precisa da permissão
          CAMERA (essa é só pra quem acessa a API de câmera diretamente). Declará-la sem
