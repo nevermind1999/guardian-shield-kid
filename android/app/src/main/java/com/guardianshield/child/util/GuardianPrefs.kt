@@ -79,6 +79,93 @@ object GuardianPrefs {
         }
     }
 
+    // --- Tarefas diárias com aprovação por foto: o backend é a fonte da verdade (o pai
+    // edita a lista e aprova/recusa pelo app dele). O nativo NÃO tem cliente socket.io
+    // (só a WebView tem, e ela raramente está aberta) — por isso o ParentalAccessibilityService
+    // consulta GET /api/tasks/sync por HTTP simples a cada ciclo do seu ticker e grava o
+    // resultado cru aqui. A Home nativa e o próprio serviço leem só daqui, nunca da rede
+    // diretamente, então continuam funcionando com o último valor conhecido mesmo se o
+    // próximo poll falhar (sem internet, servidor fora do ar, etc). ---
+
+    private const val KEY_TASK_UNLOCK_MODE = "taskUnlockMode"
+    private const val KEY_TASKS_SYNC_JSON = "tasksSyncJson"
+
+    data class TaskItem(
+        val id: String,
+        val title: String,
+        val icon: String,
+        val rewardMinutes: Int,
+        val status: String, // "pending" | "submitted" | "approved" | "rejected"
+        val rejectedReason: String?
+    )
+
+    fun taskUnlockMode(context: Context): String =
+        of(context).getString(KEY_TASK_UNLOCK_MODE, "off") ?: "off"
+
+    /**
+     * Chamado só pelo poll do ParentalAccessibilityService, depois de um GET /api/tasks/sync
+     * bem-sucedido. No modo "earn" também atualiza dailyLimitMinutes (é o backend quem
+     * calcula a soma das tarefas aprovadas); nos outros modos não mexe nesse valor, pra não
+     * pisar a configuração manual do pai.
+     */
+    fun saveTasksSync(context: Context, unlockMode: String, dailyLimitMinutes: Int, rawJson: String) {
+        val editor = of(context).edit()
+            .putString(KEY_TASK_UNLOCK_MODE, unlockMode)
+            .putString(KEY_TASKS_SYNC_JSON, rawJson)
+        if (unlockMode == "earn") {
+            editor.putInt("dailyLimitMinutes", dailyLimitMinutes)
+        }
+        editor.apply()
+    }
+
+    fun parsedTodayTasks(context: Context): List<TaskItem> {
+        val raw = of(context).getString(KEY_TASKS_SYNC_JSON, null) ?: return emptyList()
+        return try {
+            val root = org.json.JSONObject(raw)
+            val dailyTasks = root.optJSONArray("dailyTasks") ?: org.json.JSONArray()
+            val todayStatus = root.optJSONArray("todayStatus") ?: org.json.JSONArray()
+            val statusById = (0 until todayStatus.length()).associate { i ->
+                val obj = todayStatus.getJSONObject(i)
+                obj.getString("taskId") to obj
+            }
+            (0 until dailyTasks.length()).map { i ->
+                val obj = dailyTasks.getJSONObject(i)
+                val id = obj.getString("id")
+                val statusObj = statusById[id]
+                TaskItem(
+                    id = id,
+                    title = obj.optString("title", "Tarefa"),
+                    icon = obj.optString("icon", "✅"),
+                    rewardMinutes = obj.optInt("rewardMinutes", 0),
+                    status = statusObj?.optString("status", "pending") ?: "pending",
+                    rejectedReason = statusObj?.let { if (it.isNull("rejectedReason")) null else it.optString("rejectedReason") }
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /** true se o modo "tudo ou nada" estiver ativo e ainda faltar pelo menos 1 tarefa aprovada hoje. */
+    fun isTaskGateBlocking(context: Context): Boolean {
+        if (taskUnlockMode(context) != "all_or_nothing") return false
+        val tasks = parsedTodayTasks(context)
+        if (tasks.isEmpty()) return false // sem tarefa cadastrada, não há o que travar
+        return tasks.any { it.status != "approved" }
+    }
+
+    // Último endereço do backend que respondeu com sucesso a um poll de tarefas — deixado
+    // em cache pra LauncherHomeActivity tentar primeiro ao enviar uma foto, em vez de
+    // percorrer todos os candidatos de novo a cada envio.
+    private const val KEY_LAST_WORKING_SERVER = "lastWorkingServerUrl"
+
+    fun lastWorkingServerUrl(context: Context): String? =
+        of(context).getString(KEY_LAST_WORKING_SERVER, null)
+
+    fun setLastWorkingServerUrl(context: Context, url: String) {
+        of(context).edit().putString(KEY_LAST_WORKING_SERVER, url).apply()
+    }
+
     // --- Apps fixados na tela inicial, em ORDEM (o usuário reorganiza arrastando) ---
 
     fun hasInitializedPinnedApps(context: Context): Boolean {

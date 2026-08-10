@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.SurfaceTexture
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaPlayer
@@ -15,6 +17,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.Surface
@@ -27,23 +30,34 @@ import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
 import androidx.core.view.GestureDetectorCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.ItemTouchHelper
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.guardianshield.child.model.AppEntry
 import com.guardianshield.child.util.AppRepository
 import com.guardianshield.child.util.GuardianPrefs
+import com.guardianshield.child.util.ServerConfig
 import com.guardianshield.child.util.VideoTransform
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.min
 
 /**
  * Tela inicial (Home) nativa do GuardianShield: relógio, papel de parede real do aparelho
@@ -77,6 +91,28 @@ class LauncherHomeActivity : AppCompatActivity() {
 
     // --- Vídeo de fundo: só existe enquanto a Home está em primeiro plano ---
     private var mediaPlayer: MediaPlayer? = null
+
+    // --- Tarefas diárias: widget na Home + captura/envio de foto de comprovação ---
+    private lateinit var tasksSectionContainer: View
+    private lateinit var tasksRecyclerView: RecyclerView
+    private lateinit var taskAdapter: TaskCardAdapter
+    private var pendingPhotoTaskId: String? = null
+    private var pendingPhotoUri: Uri? = null
+    // Tarefas enviadas nesta sessão mas que o próximo poll do ParentalAccessibilityService
+    // ainda não confirmou — mostradas como "aguardando" otimisticamente até o cache real
+    // (GuardianPrefs) refletir o novo status; evita a criança achar que o toque não fez nada.
+    private val locallySubmittedTaskIds = mutableSetOf<String>()
+    private val taskSubmitExecutor = Executors.newSingleThreadExecutor()
+
+    private val takeTaskPhotoLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val taskId = pendingPhotoTaskId
+        val uri = pendingPhotoUri
+        pendingPhotoTaskId = null
+        pendingPhotoUri = null
+        if (success && taskId != null && uri != null) {
+            submitTaskPhoto(taskId, uri)
+        }
+    }
 
     // Depois de escolher o arquivo, abre a simulação de recorte (zoom/posição) antes de
     // aplicar de verdade — só grava em GuardianPrefs quando o usuário toca em "Salvar" lá.
@@ -144,6 +180,8 @@ class LauncherHomeActivity : AppCompatActivity() {
         homeGridRecyclerView = findViewById(R.id.homeGridRecyclerView)
         emptyHomeHint = findViewById(R.id.emptyHomeHint)
         videoWallpaper = findViewById(R.id.videoWallpaper)
+        tasksSectionContainer = findViewById(R.id.tasksSectionContainer)
+        tasksRecyclerView = findViewById(R.id.tasksRecyclerView)
 
         val contentColumn = findViewById<LinearLayout>(R.id.contentColumn)
         // Modo tela cheia (edge-to-edge): o wallpaper ocupa a tela toda, mas o conteúdo
@@ -193,6 +231,11 @@ class LauncherHomeActivity : AppCompatActivity() {
         )
         homeGridRecyclerView.adapter = homeAdapter
         setupDragToReorder()
+
+        taskAdapter = TaskCardAdapter(onTap = { task -> launchTaskCamera(task.id) })
+        tasksRecyclerView.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
+        tasksRecyclerView.adapter = taskAdapter
+
         applyGridColumns()
         applyThemeColors()
         refreshHomeGrid()
@@ -225,6 +268,11 @@ class LauncherHomeActivity : AppCompatActivity() {
     // A Home não fecha com o botão Voltar — igual a qualquer launcher de verdade
     override fun onBackPressed() {
         // no-op
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        taskSubmitExecutor.shutdown()
     }
 
     private fun openDrawer() {
@@ -362,6 +410,110 @@ class LauncherHomeActivity : AppCompatActivity() {
         val isEmpty = pinnedApps.isEmpty()
         homeGridRecyclerView.visibility = if (isEmpty) View.GONE else View.VISIBLE
         emptyHomeHint.visibility = if (isEmpty) View.VISIBLE else View.GONE
+
+        refreshTasksWidget()
+    }
+
+    // ============================== TAREFAS DIÁRIAS ==============================
+
+    /**
+     * Lê o cache gravado pelo ParentalAccessibilityService (GuardianPrefs) e atualiza o
+     * widget. Tarefas enviadas nesta sessão mas ainda não confirmadas pelo próximo poll
+     * aparecem otimisticamente como "aguardando aprovação" (ver [locallySubmittedTaskIds]).
+     */
+    private fun refreshTasksWidget() {
+        val tasks = GuardianPrefs.parsedTodayTasks(this).map { task ->
+            if (task.status == "pending" && task.id in locallySubmittedTaskIds) {
+                task.copy(status = "submitted")
+            } else {
+                locallySubmittedTaskIds.remove(task.id) // status real já chegou, otimismo não é mais necessário
+                task
+            }
+        }
+        taskAdapter.updateTasks(tasks)
+        tasksSectionContainer.visibility = if (tasks.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    /** Toque num card de tarefa pendente/recusada: abre a câmera nativa direto (sem galeria). */
+    private fun launchTaskCamera(taskId: String) {
+        try {
+            val photoFile = File(cacheDir, "task_photo_${System.currentTimeMillis()}.jpg")
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", photoFile)
+            pendingPhotoTaskId = taskId
+            pendingPhotoUri = uri
+            takeTaskPhotoLauncher.launch(uri)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Não foi possível abrir a câmera.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Comprime a foto e envia em background (nunca na main thread) pro backend. */
+    private fun submitTaskPhoto(taskId: String, photoUri: Uri) {
+        Toast.makeText(this, "Enviando foto...", Toast.LENGTH_SHORT).show()
+        taskSubmitExecutor.execute {
+            try {
+                val bitmap = contentResolver.openInputStream(photoUri)?.use { BitmapFactory.decodeStream(it) }
+                if (bitmap == null) {
+                    runOnUiThread { Toast.makeText(this, "Não foi possível ler a foto.", Toast.LENGTH_SHORT).show() }
+                    return@execute
+                }
+                val resized = resizeBitmap(bitmap, maxDimension = 800)
+                val output = ByteArrayOutputStream()
+                resized.compress(Bitmap.CompressFormat.JPEG, 70, output)
+                val base64Photo = Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
+
+                // Tenta primeiro o servidor que respondeu da última vez (cache do poll de
+                // tarefas), e só cai pros outros candidatos se ele não responder agora.
+                val candidates = (listOfNotNull(GuardianPrefs.lastWorkingServerUrl(this)) + ServerConfig.SERVER_URL_CANDIDATES).distinct()
+                var submitted = false
+                for (baseUrl in candidates) {
+                    if (trySubmitToServer(baseUrl, taskId, base64Photo)) {
+                        GuardianPrefs.setLastWorkingServerUrl(this, baseUrl)
+                        submitted = true
+                        break
+                    }
+                }
+
+                runOnUiThread {
+                    if (submitted) {
+                        Toast.makeText(this, "Foto enviada! Aguardando aprovação.", Toast.LENGTH_LONG).show()
+                        locallySubmittedTaskIds.add(taskId)
+                        refreshTasksWidget()
+                    } else {
+                        Toast.makeText(this, "Não foi possível enviar a foto. Tente de novo.", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { Toast.makeText(this, "Erro ao processar a foto.", Toast.LENGTH_LONG).show() }
+            }
+        }
+    }
+
+    private fun trySubmitToServer(baseUrl: String, taskId: String, base64Photo: String): Boolean {
+        return try {
+            val connection = URL("$baseUrl/api/tasks/$taskId/submit").openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.connectTimeout = 8_000
+            connection.readTimeout = 8_000
+            connection.setRequestProperty("Content-Type", "application/json")
+            val body = JSONObject().put("photoBase64", base64Photo).toString()
+            connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            val ok = connection.responseCode == 200
+            connection.disconnect()
+            ok
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** Redimensiona mantendo proporção — a foto não precisa de resolução total pra provar a tarefa. */
+    private fun resizeBitmap(bitmap: Bitmap, maxDimension: Int): Bitmap {
+        val ratio = min(min(maxDimension.toFloat() / bitmap.width, maxDimension.toFloat() / bitmap.height), 1f)
+        if (ratio >= 1f) return bitmap
+        val width = (bitmap.width * ratio).toInt()
+        val height = (bitmap.height * ratio).toInt()
+        return Bitmap.createScaledBitmap(bitmap, width, height, true)
     }
 
     private fun applyGridColumns() {

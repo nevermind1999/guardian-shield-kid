@@ -124,6 +124,33 @@
                 android:paddingVertical="8dp" />
         </LinearLayout>
 
+        <!-- TAREFAS DE HOJE: só aparece se o pai cadastrou alguma tarefa no app dele -->
+        <LinearLayout
+            android:id="@+id/tasksSectionContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="20dp"
+                android:layout_marginBottom="6dp"
+                android:text="Tarefas de hoje"
+                android:textColor="#CCFFFFFF"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/tasksRecyclerView"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingHorizontal="14dp"
+                android:clipToPadding="false" />
+        </LinearLayout>
+
         <!-- GRID DA TELA INICIAL: quantos apps o usuário quiser fixar aqui, com o
              número de colunas que ele escolher em "Personalizar" -->
         <androidx.recyclerview.widget.RecyclerView

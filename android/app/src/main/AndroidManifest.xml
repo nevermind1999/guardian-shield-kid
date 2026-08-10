@@ -13,6 +13,11 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Foto de comprovação das tarefas diárias (LauncherHomeActivity): usa TakePicture(),
+         que delega pro app de câmera do sistema via intent — NÃO precisa da permissão
+         CAMERA (essa é só pra quem acessa a API de câmera diretamente). Declará-la sem
+         implementar o fluxo de permissão em tempo de execução quebraria a captura. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
         android:usesCleartextTraffic="true"

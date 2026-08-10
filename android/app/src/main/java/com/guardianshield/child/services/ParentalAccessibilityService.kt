@@ -10,11 +10,20 @@ import android.view.accessibility.AccessibilityEvent
 import android.util.Log
 import com.guardianshield.child.LauncherHomeActivity
 import com.guardianshield.child.util.GuardianPrefs
+import com.guardianshield.child.util.ServerConfig
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.Executors
+import org.json.JSONObject
 
 class ParentalAccessibilityService : AccessibilityService() {
 
     private val tickHandler = Handler(Looper.getMainLooper())
     private var tickRunnable: Runnable? = null
+
+    // Consulta HTTP simples (o serviço não tem cliente socket.io, só a WebView tem) —
+    // roda numa thread própria pra nunca bloquear a main thread do tick.
+    private val networkExecutor = Executors.newSingleThreadExecutor()
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -22,11 +31,13 @@ class ParentalAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Contador de tempo de tela: este serviço é o único componente do app que fica vivo o
-     * tempo todo (a WebView/React só existe quando a criança abre as Configurações, e a Home
-     * nativa pode ser destruída pelo sistema) — por isso é aqui, e não no JS, que o "usado
-     * hoje" precisa ser contado de verdade. A cada minuto, se a tela estiver ligada, soma 1
-     * minuto; ao ultrapassar o limite diário, bloqueia igual à Pausa Geral.
+     * Contador de tempo de tela + sincronização de tarefas: este serviço é o único
+     * componente do app que fica vivo o tempo todo (a WebView/React só existe quando a
+     * criança abre as Configurações, e a Home nativa pode ser destruída pelo sistema) —
+     * por isso é aqui, e não no JS, que o "usado hoje" precisa ser contado de verdade e
+     * as tarefas precisam ser sincronizadas com o backend. A cada minuto: se a tela
+     * estiver ligada, soma 1 minuto e reavalia o bloqueio; sempre, dispara um poll de
+     * tarefas em background.
      */
     private fun startUsageTicker() {
         tickRunnable?.let { tickHandler.removeCallbacks(it) }
@@ -43,13 +54,70 @@ class ParentalAccessibilityService : AccessibilityService() {
     private fun tickUsageOnce() {
         val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
         val screenOn = powerManager?.isInteractive ?: true
-        if (!screenOn) return
+        if (screenOn) {
+            GuardianPrefs.incrementUsedMinutesToday(this)
+            // Reavalia o bloqueio mesmo com um app já aberto: cobre o caso do tempo
+            // acabar ou o gate de tarefas passar a valer no meio de uma sessão de uso.
+            currentBlockReason()?.let { (title, message) ->
+                Log.w("GuardianShield", "Bloqueio disparado pelo ticker: $title")
+                showOverlay(title, message)
+                bringGuardianShieldToFront()
+            }
+        }
+        networkExecutor.execute { pollTaskSync() }
+    }
 
-        GuardianPrefs.incrementUsedMinutesToday(this)
-        if (GuardianPrefs.isDailyLimitExceeded(this) && !GuardianPrefs.isPauseAllActive(this)) {
-            Log.w("GuardianShield", "Tempo limite diário esgotado — bloqueando dispositivo.")
-            showOverlay("⏳ TEMPO ESGOTADO", "Você já usou todo o tempo de tela de hoje.\nFale com seus pais para liberar mais tempo.")
-            bringGuardianShieldToFront()
+    /**
+     * GET /api/tasks/sync no backend, tentando os mesmos candidatos de servidor usados
+     * pela WebView (SERVER_URLS em App.jsx) — o nativo mantém sua própria lista porque
+     * não compartilha o cliente socket.io dela. Grava o resultado em GuardianPrefs; em
+     * caso de falha (sem internet, servidor fora do ar), simplesmente mantém o último
+     * valor conhecido — não há necessidade de tratamento especial de erro aqui.
+     */
+    private fun pollTaskSync() {
+        for (baseUrl in ServerConfig.SERVER_URL_CANDIDATES) {
+            try {
+                val connection = URL("$baseUrl/api/tasks/sync").openConnection() as HttpURLConnection
+                connection.connectTimeout = 4_000
+                connection.readTimeout = 4_000
+                connection.requestMethod = "GET"
+                if (connection.responseCode == 200) {
+                    val body = connection.inputStream.bufferedReader().use { it.readText() }
+                    val json = JSONObject(body)
+                    GuardianPrefs.saveTasksSync(
+                        this,
+                        unlockMode = json.optString("unlockMode", "off"),
+                        dailyLimitMinutes = json.optInt("dailyLimitMinutes", GuardianPrefs.dailyLimitMinutes(this)),
+                        rawJson = body
+                    )
+                    // Deixa em cache pra LauncherHomeActivity tentar este endereço primeiro
+                    // ao enviar uma foto, em vez de percorrer todos os candidatos de novo.
+                    GuardianPrefs.setLastWorkingServerUrl(this, baseUrl)
+                    connection.disconnect()
+                    return
+                }
+                connection.disconnect()
+            } catch (e: Exception) {
+                // Tenta o próximo candidato; se nenhum responder, mantém o cache antigo.
+            }
+        }
+    }
+
+    /**
+     * Motivo atual de bloqueio do aparelho, na prioridade Pausa Geral > Tarefas pendentes >
+     * Tempo esgotado — usado tanto pelo ticker (pra travar um app já aberto quando o motivo
+     * muda no meio da sessão) quanto pelo onAccessibilityEvent (pra decidir travar antes de
+     * um app abrir). Retorna null se nada estiver bloqueando.
+     */
+    private fun currentBlockReason(): Pair<String, String>? {
+        return when {
+            GuardianPrefs.isPauseAllActive(this) ->
+                "🔒 DISPOSITIVO BLOQUEADO" to "Pausa Geral Ativa.\nFale com seus pais para liberar o uso."
+            GuardianPrefs.isTaskGateBlocking(this) ->
+                "🔒 TAREFAS PENDENTES" to "Complete e envie todas as tarefas de hoje para liberar o celular."
+            GuardianPrefs.isDailyLimitExceeded(this) ->
+                "⏳ TEMPO ESGOTADO" to "Você já usou todo o tempo de tela de hoje.\nFale com seus pais para liberar mais tempo."
+            else -> null
         }
     }
 
@@ -64,26 +132,16 @@ class ParentalAccessibilityService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            val prefs = getSharedPreferences("GuardianShieldPrefs", Context.MODE_PRIVATE)
-            val isPauseAllActive = prefs.getBoolean("isPauseAllActive", false)
-            val blockedPackagesSet = prefs.getStringSet("blockedPackagesSet", emptySet()) ?: emptySet()
-            val isTimeExpired = GuardianPrefs.isDailyLimitExceeded(this)
+            val blockReason = currentBlockReason()
+            val blockedPackagesSet = GuardianPrefs.blockedPackages(this)
 
-            Log.d("GuardianShield", "App em 1º plano: $packageName | PausaGeral: $isPauseAllActive | TempoEsgotado: $isTimeExpired | Bloqueados: $blockedPackagesSet")
+            Log.d("GuardianShield", "App em 1º plano: $packageName | Bloqueio: ${blockReason?.first ?: "nenhum"} | Bloqueados: $blockedPackagesSet")
 
-            // 1. Se a PAUSA GERAL estiver ativa OU o tempo diário tiver acabado, nenhum app
-            // pode ser aberto (exceto o próprio Guardian Shield)
-            if (isPauseAllActive || isTimeExpired) {
+            // 1. Se algum motivo global estiver bloqueando (Pausa Geral, tarefas pendentes
+            // ou tempo esgotado), nenhum app pode ser aberto (exceto o próprio Guardian Shield)
+            if (blockReason != null) {
                 if (packageName != "com.guardianshield.child") {
-                    val title: String
-                    val message: String
-                    if (isTimeExpired && !isPauseAllActive) {
-                        title = "⏳ TEMPO ESGOTADO"
-                        message = "Você já usou todo o tempo de tela de hoje.\nFale com seus pais para liberar mais tempo."
-                    } else {
-                        title = "🔒 DISPOSITIVO BLOQUEADO"
-                        message = "Pausa Geral Ativa ou Tempo Limite Esgotado.\nFale com seus pais para liberar o uso."
-                    }
+                    val (title, message) = blockReason
                     Log.w("GuardianShield", "Bloqueio ativo! Forçando sobreposição para $packageName")
                     showOverlay(title, message)
                     bringGuardianShieldToFront()
@@ -91,7 +149,7 @@ class ParentalAccessibilityService : AccessibilityService() {
                 return
             }
 
-            // 2. Se a Pausa Geral NÃO estiver ativa, verifica se o aplicativo em 1º plano está bloqueado individualmente
+            // 2. Sem bloqueio global, verifica se o aplicativo em 1º plano está bloqueado individualmente
             val isBlocked = blockedPackagesSet.contains(packageName) || isPackageBlockedFallback(packageName, blockedPackagesSet)
 
             if (isBlocked && packageName != "com.guardianshield.child") {
@@ -111,7 +169,7 @@ class ParentalAccessibilityService : AccessibilityService() {
             val bLower = blocked.lowercase()
             val pkgLower = pkg.lowercase()
             if (pkgLower == bLower) return true
-            if ((bLower.contains("tiktok") || bLower.contains("musically")) && 
+            if ((bLower.contains("tiktok") || bLower.contains("musically")) &&
                 (pkgLower.contains("musically") || pkgLower.contains("trill") || pkgLower.contains("tiktok"))) return true
             if (bLower.contains("instagram") && pkgLower.contains("instagram")) return true
             if (bLower.contains("youtube") && pkgLower.contains("youtube")) return true
