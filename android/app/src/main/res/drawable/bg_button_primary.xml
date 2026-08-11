@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <corners android:radius="10dp" />
+    <corners android:radius="12dp" />
+    <!-- Era azul/roxo (#3A86FF→#8338EC) — vira laranja/laranja-queimado (marca nova). -->
     <gradient
         android:type="linear"
         android:angle="45"
-        android:startColor="#3A86FF"
-        android:endColor="#8338EC" />
+        android:startColor="#F97316"
+        android:endColor="#EA580C" />
 </shape>

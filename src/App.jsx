@@ -8,7 +8,7 @@ import { StatusBar, Style } from '@capacitor/status-bar';
 import { checkForAppUpdates } from './services/updater';
 import {
   Clock, Shield, Lock, AlertTriangle, CheckCircle,
-  Send, Smartphone, X, QrCode, Key, Download, BatteryMedium, Moon, Sun
+  Send, Smartphone, X, QrCode, Key, Download, BatteryMedium, Moon, Sun, PhoneCall
 } from 'lucide-react';
 
 const SERVER_URLS = [
@@ -386,9 +386,16 @@ export default function App() {
 
   if (!state) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', gap: '16px' }}>
-        <Clock size={36} style={{ color: 'var(--accent-cyan)' }} />
-        <p style={{ color: 'var(--text-secondary)' }}>Carregando GuardianShield Agente...</p>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', gap: '16px', position: 'relative' }}>
+        <div className="ambient-blobs"><div className="blob blob-1"></div><div className="blob blob-2"></div></div>
+        <div style={{ position: 'relative', width: '64px', height: '64px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ position: 'absolute', inset: 0, background: 'var(--accent-blue)', borderRadius: '50%', filter: 'blur(20px)', opacity: 0.3 }} />
+          <div className="glass-panel" style={{ position: 'relative', width: '64px', height: '64px', borderRadius: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Shield size={30} style={{ color: 'var(--accent-blue)' }} />
+          </div>
+        </div>
+        <h2 style={{ fontSize: '1.1rem', fontWeight: 800 }}>GuardianShield</h2>
+        <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Iniciando serviços de proteção...</p>
       </div>
     );
   }
@@ -396,9 +403,10 @@ export default function App() {
   // Se o dispositivo ainda não foi pareado, exibe a tela de Pareamento por QR Code / Código
   if (!isPaired && (!state.pairedDevices || state.pairedDevices.length === 0)) {
     return (
-      <div style={{ maxWidth: '440px', margin: '0 auto', padding: '32px 20px', minHeight: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '24px' }}>
+      <div style={{ maxWidth: '440px', margin: '0 auto', padding: '32px 20px', minHeight: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '24px', position: 'relative' }}>
+        <div className="ambient-blobs"><div className="blob blob-1"></div><div className="blob blob-2"></div></div>
         <div className="glass-panel" style={{ padding: '28px', textAlign: 'center' }}>
-          <div style={{ width: '64px', height: '64px', borderRadius: '20px', background: 'linear-gradient(135deg, #3a86ff, #8338ec)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px auto', color: 'var(--text-on-accent)' }}>
+          <div style={{ width: '64px', height: '64px', borderRadius: '20px', background: 'linear-gradient(135deg, var(--accent-blue), var(--accent-purple))', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px auto', color: 'var(--text-on-accent)' }}>
             <QrCode size={34} />
           </div>
 
@@ -462,19 +470,22 @@ export default function App() {
   const releaseNoteSummary = releaseNoteLines[0] || 'Melhorias e correções.';
   const releaseNoteDetails = releaseNoteLines.slice(1).join('\n');
 
+  const emergencyPhone = screenTime.emergencyPhone;
+
   return (
-    <div style={{ maxWidth: '480px', margin: '0 auto', padding: '20px 16px', minHeight: '100vh', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ maxWidth: '480px', margin: '0 auto', padding: '20px 16px', minHeight: '100vh', display: 'flex', flexDirection: 'column', gap: '20px', position: 'relative' }}>
+      <div className="ambient-blobs"><div className="blob blob-1"></div><div className="blob blob-2"></div></div>
 
       {/* TELA DE BLOQUEIO DE OVERLAY */}
       {isBlockedOverall && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 9999,
-          background: 'rgba(10, 13, 20, 0.95)', backdropFilter: 'blur(20px)',
+          background: '#0c0a09f2', backdropFilter: 'blur(20px)',
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
           padding: '24px', textAlign: 'center'
         }}>
-          <div style={{ width: '80px', height: '80px', borderRadius: '50%', background: 'rgba(244, 63, 94, 0.2)', border: '2px solid var(--accent-rose)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '20px' }}>
-            <Lock size={40} style={{ color: 'var(--accent-rose)' }} />
+          <div style={{ width: '90px', height: '90px', borderRadius: '50%', background: 'rgba(244, 63, 94, 0.15)', border: '6px solid rgba(244, 63, 94, 0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '24px', boxShadow: '0 0 50px rgba(244, 63, 94, 0.3)' }}>
+            <Lock size={38} style={{ color: 'var(--accent-rose)' }} />
           </div>
           <h2 style={{ fontSize: '1.6rem', fontWeight: 800, marginBottom: '10px' }}>
             {screenTime.isPauseAllActive ? 'Dispositivo Pausado pelos Pais' : 'Tempo de Tela Esgotado!'}
@@ -485,9 +496,24 @@ export default function App() {
               : 'Você atingiu o limite de tempo para hoje.'}
           </p>
 
-          <button className="btn btn-primary" onClick={() => setShowRequestModal(true)} style={{ width: '100%', maxWidth: '280px' }}>
-            <Send size={18} /> Pedir Mais Tempo aos Pais
-          </button>
+          <div style={{ width: '100%', maxWidth: '280px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <button className="btn btn-primary" onClick={() => setShowRequestModal(true)} style={{ width: '100%' }}>
+              <Send size={18} /> Pedir Mais Tempo aos Pais
+            </button>
+            {emergencyPhone ? (
+              <a
+                href={`tel:${emergencyPhone}`}
+                className="btn btn-ghost"
+                style={{ width: '100%', textDecoration: 'none' }}
+              >
+                <PhoneCall size={18} /> Chamada de Emergência
+              </a>
+            ) : (
+              <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                Peça ao seu pai/mãe para configurar um telefone de emergência no app deles.
+              </p>
+            )}
+          </div>
         </div>
       )}
 
@@ -508,7 +534,11 @@ export default function App() {
           >
             {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
           </button>
-          <span style={{ fontSize: '0.75rem', padding: '6px 12px', borderRadius: '20px', background: 'rgba(6, 214, 160, 0.15)', color: 'var(--accent-emerald)', border: '1px solid rgba(6, 214, 160, 0.3)' }}>
+          <span className="badge badge-success" style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+            <span style={{ position: 'relative', display: 'inline-flex', width: '8px', height: '8px' }}>
+              <span style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: 'var(--accent-emerald)', opacity: 0.75, animation: 'ping 1.5s cubic-bezier(0,0,0.2,1) infinite' }} />
+              <span style={{ position: 'relative', width: '8px', height: '8px', borderRadius: '50%', background: 'var(--accent-emerald)' }} />
+            </span>
             Sincronizado
           </span>
         </div>
@@ -570,9 +600,9 @@ export default function App() {
       {updateInfo && (
         <div style={{
           padding: '16px 20px', borderRadius: '16px',
-          background: 'linear-gradient(135deg, var(--accent-cyan), #8338ec)',
+          background: 'linear-gradient(135deg, var(--accent-blue), var(--accent-rose))',
           color: 'var(--text-on-accent)', display: 'flex', flexWrap: 'wrap', alignItems: 'center',
-          justifyContent: 'space-between', gap: '12px', boxShadow: '0 8px 24px rgba(58, 134, 255, 0.3)'
+          justifyContent: 'space-between', gap: '12px', boxShadow: '0 8px 24px rgba(249, 115, 22, 0.3)'
         }}>
           <div>
             <h4 style={{ fontSize: '0.95rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -629,22 +659,23 @@ export default function App() {
       )}
 
       {/* COUNTER DE TEMPO DE TELA */}
-      <div className="glass-panel" style={{ padding: '24px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
-        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '1px', fontWeight: 700 }}>
+      <div className="glass-panel" style={{ padding: '32px 24px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
+        <div style={{ position: 'absolute', top: '-48px', left: '-48px', width: '160px', height: '160px', background: 'rgba(249, 115, 22, 0.15)', borderRadius: '50%', filter: 'blur(50px)', pointerEvents: 'none' }} />
+        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '1px', fontWeight: 800, position: 'relative' }}>
           Tempo Restante Hoje
         </span>
-        <div style={{ fontSize: '2.5rem', fontWeight: 800, color: 'var(--accent-cyan)', margin: '8px 0' }}>
+        <div style={{ fontSize: '3rem', fontWeight: 800, color: 'var(--accent-blue)', margin: '8px 0', position: 'relative' }}>
           {Math.floor(remainingMinutes / 60)}h {remainingMinutes % 60}m
         </div>
 
-        <div style={{ height: '8px', background: 'var(--surface-3)', borderRadius: '4px', overflow: 'hidden', margin: '16px 0' }}>
+        <div style={{ height: '10px', background: 'var(--surface-3)', borderRadius: '4px', overflow: 'hidden', margin: '16px auto', maxWidth: '220px', position: 'relative' }}>
           <div style={{
             height: '100%', width: `${(remainingMinutes / screenTime.dailyLimitMinutes) * 100}%`,
-            background: 'linear-gradient(90deg, #3a86ff, #06d6a0)', borderRadius: '4px'
+            background: 'linear-gradient(90deg, var(--accent-blue), var(--accent-purple))', borderRadius: '4px'
           }} />
         </div>
 
-        <button className="btn btn-primary" onClick={() => setShowRequestModal(true)} style={{ width: '100%', marginTop: '8px' }}>
+        <button className="btn btn-primary" onClick={() => setShowRequestModal(true)} style={{ width: '100%', marginTop: '8px', position: 'relative' }}>
           <Send size={16} /> Solicitar Tempo Extra
         </button>
       </div>
@@ -666,18 +697,34 @@ export default function App() {
 
             <form onSubmit={handleSendTimeRequest} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
               <div>
-                <label style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--text-muted)', marginBottom: '8px' }}>
                   Quanto tempo você precisa?
                 </label>
-                <select
-                  value={requestedMinutes}
-                  onChange={(e) => setRequestedMinutes(e.target.value)}
-                  style={{ width: '100%', padding: '10px', borderRadius: '8px', background: 'var(--surface-2)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', outline: 'none' }}
-                >
-                  <option value="15" style={{ background: 'var(--bg-card)' }}>15 minutos</option>
-                  <option value="30" style={{ background: 'var(--bg-card)' }}>30 minutos</option>
-                  <option value="60" style={{ background: 'var(--bg-card)' }}>1 hora</option>
-                </select>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+                  {[
+                    { value: 15, label: '15 min' },
+                    { value: 30, label: '30 min' },
+                    { value: 60, label: '1 hora' }
+                  ].map(opt => {
+                    const isSelected = Number(requestedMinutes) === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setRequestedMinutes(opt.value)}
+                        style={{
+                          padding: '12px 0', borderRadius: '12px', fontSize: '0.85rem', fontWeight: 700,
+                          background: isSelected ? 'rgba(249, 115, 22, 0.12)' : 'var(--surface-2)',
+                          color: isSelected ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                          border: isSelected ? '1px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                          cursor: 'pointer', fontFamily: 'inherit'
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
               <div>

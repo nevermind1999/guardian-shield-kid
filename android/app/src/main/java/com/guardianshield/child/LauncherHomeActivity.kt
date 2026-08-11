@@ -1,5 +1,7 @@
 package com.guardianshield.child
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -25,7 +27,6 @@ import android.view.TextureView
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
-import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.PopupMenu
@@ -217,6 +218,7 @@ class LauncherHomeActivity : AppCompatActivity() {
         // gesto e o clique normal nunca chega a disparar.
         val drawerHandleDetector = GestureDetectorCompat(this, SwipeUpListener(treatTapAsSwipe = true) { openDrawer() })
         drawerHandle.setOnTouchListener { _, event -> drawerHandleDetector.onTouchEvent(event) }
+        setupDrawerHandleBounce()
 
         // Relógio e pílula de status só respondem a arrastar pra cima (toque simples neles
         // não faz nada além do que já fazem, ex: o botão "Tempo extra" dentro da pílula).
@@ -554,13 +556,24 @@ class LauncherHomeActivity : AppCompatActivity() {
     private fun applyThemeColors() {
         val (start, end) = GuardianPrefs.themeColors(this)
         val gradient = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(start, end))
-        gradient.cornerRadius = 10.dp.toFloat()
+        gradient.cornerRadius = 12.dp.toFloat()
         requestTimeButton.background = gradient
 
-        val handlePill = (drawerHandle as FrameLayout).getChildAt(0)
+        // drawerHandle virou LinearLayout(chevron, barra) — era FrameLayout com só a
+        // barra (índice 0) antes do chevron de "arraste pra cima" ser adicionado.
+        val handlePill = (drawerHandle as LinearLayout).getChildAt(1)
         val pillDrawable = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(start, end))
         pillDrawable.cornerRadius = 999f
         handlePill.background = pillDrawable
+    }
+
+    /** Chevron balançando sozinho acima da alça da gaveta, só pra sugerir o gesto (visual). */
+    private fun setupDrawerHandleBounce() {
+        val chevron = findViewById<View>(R.id.drawerHandleChevron) ?: return
+        val bounce = ObjectAnimator.ofFloat(chevron, "translationY", 0f, -6f, 0f)
+        bounce.duration = 1200
+        bounce.repeatCount = ValueAnimator.INFINITE
+        bounce.start()
     }
 
     // ============================== VÍDEO DE FUNDO ANIMADO ==============================
@@ -699,8 +712,10 @@ class LauncherHomeActivity : AppCompatActivity() {
             params.setMargins(6.dp, 6.dp, 6.dp, 6.dp)
             swatch.layoutParams = params
 
+            // Quadrado arredondado (era círculo) — mesma linguagem visual dos chips de
+            // coluna acima e do protótipo (swatches em grid de "cantos vivos").
             val swatchDrawable = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(android.graphics.Color.parseColor(startHex), android.graphics.Color.parseColor(endHex)))
-            swatchDrawable.shape = GradientDrawable.OVAL
+            swatchDrawable.cornerRadius = 16.dp.toFloat()
             if (android.graphics.Color.parseColor(startHex) == currentStart) {
                 swatchDrawable.setStroke(3.dp, 0xFFFFFFFF.toInt())
             }
@@ -741,7 +756,7 @@ class LauncherHomeActivity : AppCompatActivity() {
 
     private fun columnOptionBackground(selected: Boolean): GradientDrawable {
         val drawable = GradientDrawable()
-        drawable.cornerRadius = 10.dp.toFloat()
+        drawable.cornerRadius = 14.dp.toFloat()
         if (selected) {
             val (start, end) = GuardianPrefs.themeColors(this)
             drawable.orientation = GradientDrawable.Orientation.TL_BR

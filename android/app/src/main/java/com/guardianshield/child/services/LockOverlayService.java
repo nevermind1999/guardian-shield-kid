@@ -50,7 +50,9 @@ public class LockOverlayService extends Service {
     // alinham nessa mesma largura, em vez de cada um ter seu próprio valor solto
     // como antes, que foi a causa do card de tarefa ficar espremido/quebrado).
     private static final int CONTENT_WIDTH_DP = 300;
-    private static final String BG_DARK = "#0b1120";
+    // Repaginação laranja/quente (era #0b1120, azul bem escuro) — mesmo tom neutro
+    // quente usado nos apps React (index.css de ambos).
+    private static final String BG_DARK = "#0c0a09";
 
     private WindowManager windowManager;
     private View overlayView;
@@ -179,30 +181,38 @@ public class LockOverlayService extends Service {
                 pinCardParams.topMargin = dp(16);
                 pinCard.setLayoutParams(pinCardParams);
 
+                // Campo + botão lado a lado (era empilhado) — mesmo padrão do protótipo
+                // nativo (.pin-input-group: input flex:1 + botão fixo ao lado).
+                LinearLayout pinRow = new LinearLayout(this);
+                pinRow.setOrientation(LinearLayout.HORIZONTAL);
+                pinRow.setGravity(Gravity.CENTER_VERTICAL);
+
                 pinInputView = new EditText(this);
                 pinInputView.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
                 pinInputView.setFilters(new InputFilter[]{ new InputFilter.LengthFilter(6) });
-                pinInputView.setHint("PIN dos pais");
+                pinInputView.setHint("PIN");
                 pinInputView.setTextColor(Color.WHITE);
-                pinInputView.setHintTextColor(Color.parseColor("#64748b"));
+                pinInputView.setHintTextColor(Color.parseColor("#78716c"));
                 pinInputView.setGravity(Gravity.CENTER);
-                pinInputView.setTextSize(20);
+                pinInputView.setTextSize(18);
                 pinInputView.setBackground(buildInputFieldBackground());
                 pinInputView.setPadding(dp(16), dp(14), dp(16), dp(14));
-                pinInputView.setLayoutParams(new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-                pinCard.addView(pinInputView);
+                pinInputView.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+                pinRow.addView(pinInputView);
 
                 Button unlockButton = new Button(this);
-                unlockButton.setText("Desbloquear");
+                unlockButton.setText("OK");
                 unlockButton.setTextColor(Color.WHITE);
                 unlockButton.setAllCaps(false);
                 unlockButton.setBackground(buildAccentGradient(dp(14)));
-                LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-                btnParams.topMargin = dp(14);
+                LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT);
+                btnParams.leftMargin = dp(10);
+                unlockButton.setMinWidth(dp(64));
                 unlockButton.setLayoutParams(btnParams);
                 unlockButton.setOnClickListener(v -> attemptPinUnlock());
-                pinCard.addView(unlockButton);
+                pinRow.addView(unlockButton);
 
+                pinCard.addView(pinRow);
                 layout.addView(pinCard);
             } else {
                 pinInputView = null;
@@ -280,9 +290,9 @@ public class LockOverlayService extends Service {
     /** "Vidro fosco": painel semitransparente com borda clara fina, sem precisar de blur de verdade. */
     private GradientDrawable buildGlassCard() {
         GradientDrawable card = new GradientDrawable();
-        card.setColor(Color.argb(28, 255, 255, 255));
-        card.setCornerRadius(dp(20));
-        card.setStroke(dp(1), Color.argb(46, 255, 255, 255));
+        card.setColor(Color.argb(36, 255, 255, 255));
+        card.setCornerRadius(dp(24));
+        card.setStroke(dp(1), Color.argb(56, 255, 255, 255));
         return card;
     }
 
@@ -297,7 +307,7 @@ public class LockOverlayService extends Service {
     private GradientDrawable buildInputFieldBackground() {
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(Color.argb(40, 255, 255, 255));
-        bg.setCornerRadius(dp(12));
+        bg.setCornerRadius(dp(14));
         bg.setStroke(dp(1), Color.argb(60, 255, 255, 255));
         return bg;
     }

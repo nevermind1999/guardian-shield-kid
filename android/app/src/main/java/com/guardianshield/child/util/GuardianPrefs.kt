@@ -19,16 +19,17 @@ object GuardianPrefs {
     private const val KEY_VIDEO_WALLPAPER_URI = "homeVideoWallpaperUri"
 
     // Paleta de temas disponível para o usuário escolher em "Personalizar tela inicial".
-    // Cada par é [corInicial, corFinal] de um degradê.
+    // Cada par é [corInicial, corFinal] de um degradê. Repaginação laranja/quente
+    // (era azul/roxo por padrão) pra bater com a nova identidade dos 3 apps.
     val THEME_PRESETS: List<Pair<String, String>> = listOf(
-        "#3A86FF" to "#8338EC", // azul/roxo (padrão)
-        "#06D6A0" to "#118AB2", // verde/azul
-        "#FF006E" to "#FB5607", // rosa/laranja
-        "#FFBE0B" to "#FB5607", // amarelo/laranja
-        "#8338EC" to "#FF006E", // roxo/rosa
-        "#118AB2" to "#06D6A0", // azul/verde
-        "#EF476F" to "#8338EC", // vermelho/roxo
-        "#495057" to "#212529"  // cinza monocromático
+        "#F97316" to "#EA580C", // laranja (padrão)
+        "#3B82F6" to "#2563EB", // azul
+        "#A855F7" to "#7E22CE", // roxo
+        "#10B981" to "#059669", // esmeralda
+        "#F43F5E" to "#E11D48", // rosa
+        "#EAB308" to "#CA8A04", // amarelo
+        "#14B8A6" to "#0D9488", // teal
+        "#57534E" to "#292524"  // escuro monocromático
     )
     private val DEFAULT_THEME = THEME_PRESETS[0]
     val GRID_COLUMN_OPTIONS = listOf(3, 4, 5, 6)

@@ -8,6 +8,11 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
+import android.os.BatteryManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -85,15 +90,22 @@ class ParentalAccessibilityService : AccessibilityService() {
 
         tickCount++
         networkExecutor.execute {
-            val forceFreshLocation = pollRulesSync()
+            val syncFlags = pollRulesSync()
             if (tickCount % 5 == 0) postInstalledApps()
             if (GuardianPrefs.pendingPinUnlockAck(this)) ackPinUnlock()
             // Localização a cada ciclo (60s) — bem mais fresco que antes, quando só
             // atualizava se a WebView estivesse aberta. forceFreshLocation vem de um
             // pedido de "Forçar Atualização" do pai (ver locationUpdateRequested).
-            fetchLocationAndReport(forceFreshLocation)
+            fetchLocationAndReport(syncFlags.forceFreshLocation)
+            // Bateria/wifi/modelo: sozinho a cada ~5min (tickCount % 5, mesmo ritmo dos
+            // apps instalados), ou na hora se o pai clicou "sincronizar" no header
+            // (deviceSyncRequested) — sem esperar o próximo ciclo de 5min.
+            if (tickCount % 5 == 0 || syncFlags.forceDeviceSync) postDeviceTelemetry()
         }
     }
+
+    /** Flags de "atualização forçada" devolvidas pelo poll de regras — ver pollRulesSync. */
+    private data class SyncFlags(val forceFreshLocation: Boolean, val forceDeviceSync: Boolean)
 
     /**
      * GET /api/tasks/sync no backend, tentando os mesmos candidatos de servidor usados
@@ -101,9 +113,9 @@ class ParentalAccessibilityService : AccessibilityService() {
      * não compartilha o cliente socket.io dela. Grava tarefas + regras de bloqueio
      * (pausa geral, apps bloqueados, limite diário, PIN de emergência) em GuardianPrefs;
      * em caso de falha (sem internet, servidor fora do ar), mantém o último valor
-     * conhecido. Retorna se o pai pediu uma atualização de GPS forçada nesse ciclo.
+     * conhecido. Retorna quais atualizações forçadas o pai pediu nesse ciclo (GPS/sincronizar).
      */
-    private fun pollRulesSync(): Boolean {
+    private fun pollRulesSync(): SyncFlags {
         for (baseUrl in ServerConfig.SERVER_URL_CANDIDATES) {
             try {
                 val connection = URL("$baseUrl/api/tasks/sync").openConnection() as HttpURLConnection
@@ -133,14 +145,17 @@ class ParentalAccessibilityService : AccessibilityService() {
                     // As regras acabaram de mudar (ou foram confirmadas) — reavalia de
                     // novo pra refletir na hora, sem esperar o próximo tick de 1min.
                     tickHandler.post { reevaluateBlockState() }
-                    return json.optBoolean("locationUpdateRequested", false)
+                    return SyncFlags(
+                        forceFreshLocation = json.optBoolean("locationUpdateRequested", false),
+                        forceDeviceSync = json.optBoolean("deviceSyncRequested", false)
+                    )
                 }
                 connection.disconnect()
             } catch (e: Exception) {
                 // Tenta o próximo candidato; se nenhum responder, mantém o cache antigo.
             }
         }
-        return false
+        return SyncFlags(forceFreshLocation = false, forceDeviceSync = false)
     }
 
     /**
@@ -190,6 +205,57 @@ class ParentalAccessibilityService : AccessibilityService() {
             )
         }
         postJson("/api/device/apps-sync", JSONObject().put("installedApps", appsArray).toString())
+    }
+
+    /**
+     * POST /api/device/telemetry-sync com bateria, tipo de rede (+ nome do Wi-Fi quando
+     * conectado) e modelo do aparelho — mesmo padrão de "sempre vivo" do postInstalledApps
+     * (antes esses 3 campos só chegavam via 'child:telemetry' da WebView, que quase nunca
+     * abre no uso normal). Roda sozinho a cada ~5min ou na hora quando o pai pede sync.
+     */
+    private fun postDeviceTelemetry() {
+        val body = JSONObject()
+            .put("batteryLevel", currentBatteryLevel())
+            .put("networkType", currentNetworkDescription())
+            .put("deviceModel", "${Build.MANUFACTURER} ${Build.MODEL}".trim())
+            .toString()
+        postJson("/api/device/telemetry-sync", body)
+    }
+
+    private fun currentBatteryLevel(): Int {
+        val bm = getSystemService(Context.BATTERY_SERVICE) as? BatteryManager ?: return -1
+        return bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+    }
+
+    /**
+     * "Wi-Fi (NomeDaRede)" / "Dados móveis" / "Sem conexão" — ler o SSID exige permissão
+     * de localização (já concedida pra GPS), sem ela cai só em "Wi-Fi" sem o nome.
+     */
+    private fun currentNetworkDescription(): String {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return "Desconhecido"
+        val network = cm.activeNetwork ?: return "Sem conexão"
+        val capabilities = cm.getNetworkCapabilities(network) ?: return "Sem conexão"
+        return when {
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> {
+                val ssid = currentWifiSsid()
+                if (ssid != null) "Wi-Fi ($ssid)" else "Wi-Fi"
+            }
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Dados móveis"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+            else -> "Conectado"
+        }
+    }
+
+    private fun currentWifiSsid(): String? {
+        if (!hasLocationPermission()) return null
+        return try {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return null
+            val ssid = wm.connectionInfo?.ssid ?: return null
+            val cleaned = ssid.removePrefix("\"").removeSuffix("\"")
+            if (cleaned.isBlank() || cleaned == "<unknown ssid>") null else cleaned
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /**

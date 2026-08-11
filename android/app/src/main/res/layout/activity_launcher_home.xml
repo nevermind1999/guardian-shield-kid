@@ -173,18 +173,30 @@
             android:textSize="13sp"
             android:visibility="gone" />
 
-        <!-- ALÇA DA GAVETA: toque ou arraste pra cima pra abrir -->
-        <FrameLayout
+        <!-- ALÇA DA GAVETA: toque ou arraste pra cima pra abrir. O chevron balança
+             sozinho (ver setupDrawerHandleBounce em LauncherHomeActivity) só pra
+             sugerir o gesto, igual protótipo — a barra continua sendo o toque/arraste. -->
+        <LinearLayout
             android:id="@+id/drawerHandle"
             android:layout_width="match_parent"
-            android:layout_height="40dp"
-            android:layout_gravity="center_horizontal">
+            android:layout_height="52dp"
+            android:layout_gravity="center_horizontal"
+            android:orientation="vertical"
+            android:gravity="center">
+
+            <ImageView
+                android:id="@+id/drawerHandleChevron"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:layout_marginBottom="2dp"
+                android:src="@android:drawable/arrow_up_float"
+                android:tint="#99FFFFFF"
+                android:contentDescription="@null" />
 
             <View
                 android:layout_width="44dp"
                 android:layout_height="5dp"
-                android:layout_gravity="center"
                 android:background="@drawable/bg_status_pill" />
-        </FrameLayout>
+        </LinearLayout>
     </LinearLayout>
 </FrameLayout>
