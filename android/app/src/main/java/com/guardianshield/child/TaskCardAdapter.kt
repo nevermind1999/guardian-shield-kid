@@ -5,7 +5,11 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
+import com.guardianshield.child.util.GuardianPrefs
 import com.guardianshield.child.util.GuardianPrefs.TaskItem
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Grade horizontal de tarefas diárias na Home nativa (mesmo esquema do AppGridAdapter,
@@ -45,10 +49,16 @@ class TaskCardAdapter(
             titleText.text = task.title
             rewardText.text = "+${task.rewardMinutes} min"
 
-            val (label, tappable) = when (task.status) {
-                "submitted" -> "⏳ Aguardando aprovação" to false
-                "approved" -> "✅ Aprovada" to false
-                "rejected" -> (task.rejectedReason?.let { "❌ $it" } ?: "❌ Recusada, toque p/ reenviar") to true
+            val (label, tappable) = when {
+                task.status == "submitted" -> "⏳ Aguardando aprovação" to false
+                task.status == "approved" -> "✅ Aprovada" to false
+                task.status == "rejected" -> (task.rejectedReason?.let { "❌ $it" } ?: "❌ Recusada, toque p/ reenviar") to true
+                // Adiada pelo pai (ver parent:snooze_task) — ainda pode enviar a foto
+                // antes do prazo se quiser, só não é mais cobrada até ele passar.
+                GuardianPrefs.isTaskSnoozed(task) -> {
+                    val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(task.snoozeUntil!!))
+                    "😴 Adiada até $time" to true
+                }
                 else -> "📸 Toque para enviar foto" to true
             }
             statusText.text = label

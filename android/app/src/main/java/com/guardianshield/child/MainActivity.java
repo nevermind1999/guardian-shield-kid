@@ -267,6 +267,19 @@ public class MainActivity extends BridgeActivity {
             call.resolve(result);
         }
 
+        /**
+         * Grava o token de dispositivo (JWT) devolvido pelo backend ao concluir o
+         * pareamento (child:pair_result) — ver GuardianPrefs.setDeviceToken. O
+         * ParentalAccessibilityService passa a mandar esse token em toda chamada HTTP
+         * dele, pra ligar este aparelho à família certa em vez do fallback legado.
+         */
+        @PluginMethod
+        public void setDeviceToken(PluginCall call) {
+            String token = call.getString("token");
+            GuardianPrefs.INSTANCE.setDeviceToken(getContext(), token);
+            call.resolve();
+        }
+
         @PluginMethod
         public void checkAccessibilityStatus(PluginCall call) {
             boolean enabled = MainActivity.isAccessibilityServiceEnabled(getContext());

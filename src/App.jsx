@@ -311,6 +311,12 @@ export default function App() {
         setIsPairingLoading(false);
         if (res.success) {
           setIsPaired(true);
+          // Token da família dona deste pareamento (ver completePairing em server.js) —
+          // grava no nativo pra o ParentalAccessibilityService (que roda o tempo todo,
+          // mesmo com esta WebView fechada) passar a mandar em toda chamada HTTP dele.
+          if (res.deviceToken && Capacitor.isNativePlatform() && Capacitor.Plugins?.PauseModule?.setDeviceToken) {
+            Capacitor.Plugins.PauseModule.setDeviceToken({ token: res.deviceToken });
+          }
         } else {
           setPairingError(res.message || 'Código inválido.');
         }

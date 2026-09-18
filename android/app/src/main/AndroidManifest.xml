@@ -13,6 +13,10 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Notificação do PermissionWatchdog quando Acessibilidade/sobreposição caem sozinhas
+         (ver util/PermissionWatchdog.kt) — runtime request feito em LauncherHomeActivity,
+         não crasha se negada, só faz notify() não aparecer (o banner da Home continua). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- UpdaterModule: instalar o APK de atualização baixado via DownloadManager
          (não é uma permissão perigosa em tempo de execução — o usuário concede uma
          vez em Configurações se ainda não tiver permitido "instalar apps desconhecidos"
@@ -131,6 +135,20 @@
         <service
             android:name=".services.LockOverlayService"
             android:exported="false" />
+
+        <!-- 5. PROTECTION WATCHDOG: detecta Acessibilidade/sobreposição caírem sozinhas
+             mesmo se a criança nunca voltar pra Home (ver util/PermissionWatchdog.kt) —
+             BOOT_COMPLETED reagenda o ciclo do AlarmManager a cada boot (ele não sobrevive
+             sozinho a um reboot); o ciclo em si chega como intent explícita, sem precisar
+             de intent-filter próprio. -->
+        <receiver
+            android:name=".receivers.ProtectionWatchdogReceiver"
+            android:exported="true"
+            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

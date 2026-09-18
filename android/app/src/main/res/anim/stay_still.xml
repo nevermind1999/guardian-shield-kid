@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No-op: mantém a Home parada e visível por trás enquanto a Gaveta desliza por cima
+     (e vice-versa ao fechar) — usado como par do slide_up_in/slide_down_out em
+     overridePendingTransition, no lugar do fade que existia antes. -->
+<set xmlns:android="http://schemas.android.com/apk/res/android">
+    <translate
+        android:fromYDelta="0"
+        android:toYDelta="0"
+        android:duration="260" />
+</set>

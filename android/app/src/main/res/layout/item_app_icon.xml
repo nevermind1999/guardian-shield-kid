@@ -32,6 +32,19 @@
             android:src="@android:drawable/ic_lock_lock"
             android:visibility="gone"
             android:contentDescription="@null" />
+
+        <!-- Selo do canto: só visível em apps que o pai marcou "sempre disponível" (ver
+             GuardianPrefs.alwaysAvailablePackages) — nunca aparece junto do lockIcon,
+             porque esses apps nunca ficam com blocked=true (AppGridAdapter.onBindViewHolder). -->
+        <ImageView
+            android:id="@+id/alwaysAvailableBadge"
+            android:layout_width="16dp"
+            android:layout_height="16dp"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="2dp"
+            android:src="@drawable/ic_always_available_badge"
+            android:visibility="gone"
+            android:contentDescription="@null" />
     </FrameLayout>
 
     <TextView

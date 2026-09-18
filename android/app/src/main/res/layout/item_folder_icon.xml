@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Mesmas dimensões de item_app_icon.xml (56dp de "ícone" + rótulo 76dp) pra pasta e app
+     ocuparem células do mesmo tamanho na grade — só o miolo muda: em vez de 1 ícone,
+     uma mini-prévia 2x2 dos até 4 primeiros apps de dentro (GuardianPrefs.HomeItem.FolderItem). -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:padding="4dp"
+    android:layout_margin="4dp">
+
+    <FrameLayout
+        android:id="@+id/folderFrame"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:background="@drawable/bg_app_icon"
+        android:foreground="?android:attr/selectableItemBackgroundBorderless"
+        android:clickable="true"
+        android:focusable="true">
+
+        <GridLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_margin="7dp"
+            android:columnCount="2"
+            android:rowCount="2">
+
+            <ImageView android:id="@+id/folderPreview1" android:layout_width="0dp" android:layout_height="0dp" android:layout_columnWeight="1" android:layout_rowWeight="1" android:layout_margin="1dp" android:scaleType="fitCenter" android:contentDescription="@null" />
+            <ImageView android:id="@+id/folderPreview2" android:layout_width="0dp" android:layout_height="0dp" android:layout_columnWeight="1" android:layout_rowWeight="1" android:layout_margin="1dp" android:scaleType="fitCenter" android:contentDescription="@null" />
+            <ImageView android:id="@+id/folderPreview3" android:layout_width="0dp" android:layout_height="0dp" android:layout_columnWeight="1" android:layout_rowWeight="1" android:layout_margin="1dp" android:scaleType="fitCenter" android:contentDescription="@null" />
+            <ImageView android:id="@+id/folderPreview4" android:layout_width="0dp" android:layout_height="0dp" android:layout_columnWeight="1" android:layout_rowWeight="1" android:layout_margin="1dp" android:scaleType="fitCenter" android:contentDescription="@null" />
+        </GridLayout>
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/folderLabelText"
+        android:layout_width="76dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:gravity="center"
+        android:textColor="#FFFFFF"
+        android:textSize="11sp"
+        android:maxLines="1"
+        android:ellipsize="end" />
+</LinearLayout>

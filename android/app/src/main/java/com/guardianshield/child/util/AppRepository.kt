@@ -33,11 +33,18 @@ object AppRepository {
             .filter { it.activityInfo.packageName != selfPackage }
             .distinctBy { it.activityInfo.packageName }
             .map { info ->
+                val packageName = info.activityInfo.packageName
+                val installedAt = try {
+                    pm.getPackageInfo(packageName, 0).firstInstallTime
+                } catch (e: Exception) {
+                    0L
+                }
                 AppEntry(
-                    packageName = info.activityInfo.packageName,
+                    packageName = packageName,
                     label = info.loadLabel(pm).toString(),
                     icon = info.loadIcon(pm),
-                    category = categoryOf(info.activityInfo.applicationInfo)
+                    category = categoryOf(info.activityInfo.applicationInfo),
+                    installedAt = installedAt
                 )
             }
             .sortedBy { it.label.lowercase() }

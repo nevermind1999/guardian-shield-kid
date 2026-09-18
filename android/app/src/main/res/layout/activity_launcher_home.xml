@@ -28,13 +28,66 @@
         android:layout_height="match_parent"
         android:orientation="vertical">
 
-        <!-- TOPO: engrenagem de configurações + paleta de personalização -->
+        <!-- AVISO DE PERMISSÃO FALTANDO: sem Acessibilidade ou "Aparecer sobre outros apps"
+             concedidas, o bloqueio inteiro falha silenciosamente (foi exatamente o bug que
+             motivou isso) — esse banner insistente (pulsando, ver setupPermissionWarningPulse)
+             avisa na Home em vez de deixar o problema invisível. Toque leva direto pra tela
+             de sistema certa (ver refreshPermissionWarning). -->
+        <LinearLayout
+            android:id="@+id/permissionWarningBanner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="#DC262626"
+            android:padding="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/permissionWarningText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="⚠️ Permissão necessária não concedida"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Corrigir ›"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- TOPO: chamada de emergência (só aparece se o pai cadastrou um telefone) +
+             engrenagem de configurações + paleta de personalização -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:gravity="end"
+            android:gravity="center_vertical"
             android:padding="12dp">
+
+            <!-- Sempre acessível, independente de Pausa Geral/bloqueio ativo — uma
+                 emergência de verdade não deveria depender do celular estar "liberado".
+                 Ver GuardianPrefs.emergencyPhone e refreshHomeGrid em LauncherHomeActivity. -->
+            <ImageButton
+                android:id="@+id/emergencyCallButton"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:background="@drawable/bg_app_icon"
+                android:src="@android:drawable/ic_menu_call"
+                android:tint="#F43F5E"
+                android:visibility="gone"
+                android:contentDescription="Ligar para emergência" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
 
             <ImageButton
                 android:id="@+id/paletteButton"
@@ -82,72 +135,111 @@
                 android:textSize="15sp" />
         </LinearLayout>
 
-        <!-- STATUS: bateria + tempo restante + pedir tempo extra -->
+        <!-- STATUS: bateria + tempo restante + pedir tempo extra + barra de progresso do
+             tempo de tela usado hoje (verde -> âmbar -> vermelho perto do limite) -->
         <LinearLayout
             android:id="@+id/statusPill"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="20dp"
             android:layout_marginBottom="12dp"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
+            android:orientation="vertical"
             android:background="@drawable/bg_status_pill"
             android:padding="14dp">
 
-            <TextView
-                android:id="@+id/batteryText"
-                android:layout_width="wrap_content"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:textColor="#CCFFFFFF"
-                android:textSize="13sp" />
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
 
-            <TextView
-                android:id="@+id/remainingTimeText"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="16dp"
-                android:textColor="#CCFFFFFF"
-                android:textSize="13sp" />
+                <TextView
+                    android:id="@+id/batteryText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="#CCFFFFFF"
+                    android:textSize="13sp" />
 
-            <Button
-                android:id="@+id/requestTimeButton"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:minHeight="0dp"
-                android:text="Tempo extra"
-                android:textAllCaps="false"
-                android:textSize="13sp"
-                android:background="@drawable/bg_button_primary"
-                android:textColor="#FFFFFF"
-                android:paddingHorizontal="14dp"
-                android:paddingVertical="8dp" />
+                <TextView
+                    android:id="@+id/remainingTimeText"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="16dp"
+                    android:textColor="#CCFFFFFF"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/requestTimeButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minHeight="0dp"
+                    android:text="Tempo extra"
+                    android:textAllCaps="false"
+                    android:textSize="13sp"
+                    android:background="@drawable/bg_button_primary"
+                    android:textColor="#FFFFFF"
+                    android:paddingHorizontal="14dp"
+                    android:paddingVertical="8dp" />
+            </LinearLayout>
+
+            <ProgressBar
+                android:id="@+id/timeProgressBar"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="6dp"
+                android:layout_marginTop="10dp"
+                android:max="1000"
+                android:progress="0"
+                android:progressTint="#10B981"
+                android:progressBackgroundTint="#33FFFFFF" />
         </LinearLayout>
 
-        <!-- TAREFAS DE HOJE: só aparece se o pai cadastrou alguma tarefa no app dele -->
+        <!-- PRÓXIMO BLOQUEIO AGENDADO: só aparece se Horário de Dormir/Estudo estiver
+             habilitado e ainda não estiver ativo agora (se já estivesse, a sobreposição
+             de bloqueio cobriria a tela inteira e essa Home nem apareceria — ver
+             refreshScheduleHint em LauncherHomeActivity). Puramente informativo, calculado
+             com o relógio do próprio aparelho; quem decide o bloqueio de verdade é o
+             backend (GuardianPrefs.isScheduledBlockActive). -->
+        <TextView
+            android:id="@+id/nextScheduleHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="20dp"
+            android:layout_marginBottom="12dp"
+            android:gravity="center"
+            android:textColor="#99FFFFFF"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <!-- TAREFAS DE HOJE: só aparece se o pai cadastrou alguma tarefa no app dele. Ganhou
+             um cartão de destaque próprio (era só texto solto) + cor dinâmica (âmbar = tem
+             pendência, verde = tudo concluído) pra não passar despercebido nem se confundir
+             com o motivo do bloqueio na tela de bloqueio (ver refreshTasksWidget). -->
         <LinearLayout
             android:id="@+id/tasksSectionContainer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginHorizontal="20dp"
+            android:layout_marginBottom="12dp"
             android:orientation="vertical"
-            android:layout_marginBottom="8dp"
+            android:padding="14dp"
             android:visibility="gone">
 
             <TextView
+                android:id="@+id/tasksSectionTitle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="20dp"
-                android:layout_marginBottom="6dp"
+                android:layout_marginBottom="10dp"
                 android:text="Tarefas de hoje"
-                android:textColor="#CCFFFFFF"
-                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
                 android:textStyle="bold" />
 
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/tasksRecyclerView"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:paddingHorizontal="14dp"
                 android:clipToPadding="false" />
         </LinearLayout>
 

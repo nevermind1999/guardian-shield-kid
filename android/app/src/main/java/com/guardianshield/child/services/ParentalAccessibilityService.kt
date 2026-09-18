@@ -2,8 +2,10 @@ package com.guardianshield.child.services
 
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
@@ -17,11 +19,15 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.MediaStore
+import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.util.Log
+import android.widget.Toast
 import com.guardianshield.child.LauncherHomeActivity
 import com.guardianshield.child.util.AppRepository
 import com.guardianshield.child.util.GuardianPrefs
+import com.guardianshield.child.util.PermissionWatchdog
 import com.guardianshield.child.util.ServerConfig
 import java.net.HttpURLConnection
 import java.net.URL
@@ -33,12 +39,54 @@ import org.json.JSONObject
 
 class ParentalAccessibilityService : AccessibilityService() {
 
+    // Pacote do app de Configurações do sistema — ver a exceção "0." em reevaluateBlockState.
+    // Só "com.android.settings" mesmo em aparelhos Samsung/OneUI (confirmado com
+    // `adb shell pm list packages` num Galaxy A06 real); listado como Set já pensando em
+    // cobrir variações de outros fabricantes se aparecerem no futuro.
+    private val SETTINGS_PACKAGES = setOf("com.android.settings")
+
+    // Pacotes "utilitários do sistema" fixos (fora teclado/câmera, que são resolvidos em
+    // runtime — ver isTransientHelperPackage) que só aparecem em cima de um app já aberto
+    // (diálogo de permissão, folha de "compartilhar com"), nunca como algo que a criança
+    // "abriu" de propósito.
+    private val SYSTEM_HELPER_PACKAGES = setOf(
+        "com.google.android.permissioncontroller",
+        "com.android.permissioncontroller",
+        "com.android.packageinstaller",
+        "com.android.systemui"
+    )
+
+    companion object {
+        /** Cadência do ruleSyncTicker — ver startRuleSyncTicker(). */
+        private const val RULE_SYNC_INTERVAL_MS = 15_000L
+    }
+
     private val tickHandler = Handler(Looper.getMainLooper())
     private var tickRunnable: Runnable? = null
 
+    // Sincronização de regras (pausa geral, tarefas, limite diário, liberação manual do
+    // pai — ver parent:grant_bonus_time) roda numa cadência PRÓPRIA, separada do tick de
+    // 1min de uso/localização/telemetria e bem mais rápida (RULE_SYNC_INTERVAL_MS) — é
+    // essa cadência que decide quanto tempo demora até uma mudança do pai chegar de
+    // verdade no aparelho da criança. Fica separada de propósito: acelerar TUDO junto
+    // multiplicaria GPS/telemetria à toa (custo de bateria/rede) sem reduzir o atraso que
+    // realmente importa, que é só a checagem de regras/bloqueio.
+    private val ruleSyncHandler = Handler(Looper.getMainLooper())
+    private var ruleSyncRunnable: Runnable? = null
+
     // Consulta HTTP simples (o serviço não tem cliente socket.io, só a WebView tem) —
-    // roda numa thread própria pra nunca bloquear a main thread do tick.
+    // roda numa thread própria pra nunca bloquear a main thread do tick. Compartilhada
+    // pelos dois tickers (usage e rule sync); por ser single-thread, as chamadas dos dois
+    // sempre executam em série, nunca concorrem entre si.
     private val networkExecutor = Executors.newSingleThreadExecutor()
+
+    // Última resposta do poll de regras (GPS/sincronizar forçados pelo pai) — escrita pelo
+    // ruleSyncTicker (a cada ~15s) e lida pelo tick de uso (a cada 60s, que é quem de fato
+    // busca localização/telemetria). O flag do backend só é zerado quando o POST
+    // correspondente é confirmado (não pelo GET em si), então não tem risco de "perder"
+    // um pedido entre os dois ritmos — o próximo poll de 15s continua devolvendo true até
+    // o tick de 60s de fato atender.
+    @Volatile private var pendingSyncFlags = SyncFlags(forceFreshLocation = false, forceDeviceSync = false)
 
     // Último pacote visto em primeiro plano (atualizado em onAccessibilityEvent) — usado
     // pelo ticker pra reavaliar o bloqueio do app atual mesmo sem um novo evento de troca
@@ -50,9 +98,41 @@ class ParentalAccessibilityService : AccessibilityService() {
     // ~5min (ela muda raramente, não precisa ir a cada ciclo de 60s como o resto).
     private var tickCount = 0
 
+    private var screenStateReceiverRegistered = false
+
+    // Cada vez que a tela liga de novo, sorteia uma cor nova pra tela de bloqueio (pedido
+    // explícito do usuário: "faça o degradê e cor de fundo das telas de bloqueio mudar
+    // sempre que a tela apagar e ativar de novo" — ver GuardianPrefs.rotateLockAccentColors)
+    // e manda o LockOverlayService se reconstruir com ela, caso já esteja mostrando algo.
+    // Registrado aqui (não no LockOverlayService) porque este é o único componente do app
+    // garantido vivo o tempo todo — o serviço da sobreposição só existe enquanto há um
+    // bloqueio ativo.
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != Intent.ACTION_SCREEN_ON) return
+            GuardianPrefs.rotateLockAccentColors(this@ParentalAccessibilityService)
+            val refreshIntent = Intent(this@ParentalAccessibilityService, LockOverlayService::class.java)
+            refreshIntent.action = "REFRESH_ACCENT"
+            startService(refreshIntent)
+            // Também reavalia o bloqueio normalmente — cobre o caso de algo ter mudado
+            // (regra do pai, tarefa, horário) enquanto a tela estava desligada.
+            reevaluateBlockState()
+        }
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         startUsageTicker()
+        startRuleSyncTicker()
+        if (!screenStateReceiverRegistered) {
+            registerReceiver(screenStateReceiver, IntentFilter(Intent.ACTION_SCREEN_ON))
+            screenStateReceiverRegistered = true
+        }
+        // Liga o watchdog externo (ver PermissionWatchdog) assim que a Acessibilidade é
+        // habilitada — ele é quem detecta se ESTE serviço aqui for desligado de novo mais
+        // tarde (sozinho ou por um otimizador de bateria do fabricante), já que nesse caso
+        // este onServiceConnected simplesmente não roda de novo pra se autodenunciar.
+        PermissionWatchdog.scheduleRepeating(this)
     }
 
     /**
@@ -77,11 +157,36 @@ class ParentalAccessibilityService : AccessibilityService() {
         tickHandler.postDelayed(runnable, 60_000L)
     }
 
+    /**
+     * Cadência rápida só pra sincronizar regras (pollRulesSync) — 15s em vez do 1min do
+     * tick de uso. `pollRulesSync` já dispara `reevaluateBlockState()` sozinho assim que a
+     * resposta chega (ver o `tickHandler.post` no fim dela), então isto sozinho já é o
+     * suficiente pra reduzir de até 60s pra até ~15s o atraso entre o pai mudar algo
+     * (Pausa Geral, liberar tempo, aprovar tarefa, ajustar limite) e o filho aplicar de
+     * verdade — sem mexer no ritmo de bateria/localização/telemetria do outro ticker.
+     */
+    private fun startRuleSyncTicker() {
+        ruleSyncRunnable?.let { ruleSyncHandler.removeCallbacks(it) }
+        val runnable = object : Runnable {
+            override fun run() {
+                networkExecutor.execute { pendingSyncFlags = pollRulesSync() }
+                ruleSyncHandler.postDelayed(this, RULE_SYNC_INTERVAL_MS)
+            }
+        }
+        ruleSyncRunnable = runnable
+        ruleSyncHandler.postDelayed(runnable, RULE_SYNC_INTERVAL_MS)
+    }
+
     private fun tickUsageOnce() {
         val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
         val screenOn = powerManager?.isInteractive ?: true
         if (screenOn) {
             GuardianPrefs.incrementUsedMinutesToday(this)
+            // Consome 1min da liberação manual "tempo de uso" em andamento, se houver uma
+            // ativa (ver GuardianPrefs.parentTimeGrantMode) — não faz nada em modo "clock"
+            // (esse escoa sozinho pelo relógio) nem se não há liberação ativa.
+            GuardianPrefs.incrementParentTimeGrantUsageMinuteIfActive(this)
+            maybeWarnLowTimeRemaining()
         }
         // Reavalia o bloqueio (geral + app atual) a cada ciclo, não só quando a janela
         // em 1º plano muda — cobre tempo esgotar, tarefa pendente, bloqueio/desbloqueio
@@ -90,13 +195,19 @@ class ParentalAccessibilityService : AccessibilityService() {
 
         tickCount++
         networkExecutor.execute {
-            val syncFlags = pollRulesSync()
+            // A sincronização de regras em si roda no ruleSyncTicker (a cada ~15s, ver
+            // startRuleSyncTicker) — aqui só consome o resultado mais recente pra decidir
+            // se precisa buscar localização/telemetria "forçadas" neste ciclo de 1min.
+            val syncFlags = pendingSyncFlags
             if (tickCount % 5 == 0) postInstalledApps()
             if (GuardianPrefs.pendingPinUnlockAck(this)) ackPinUnlock()
             // Localização a cada ciclo (60s) — bem mais fresco que antes, quando só
             // atualizava se a WebView estivesse aberta. forceFreshLocation vem de um
             // pedido de "Forçar Atualização" do pai (ver locationUpdateRequested).
             fetchLocationAndReport(syncFlags.forceFreshLocation)
+            // Histórico de apps abertos: mesmo ritmo da localização (a cada ciclo, 60s)
+            // — é o tipo de coisa que o pai quer ver fresco, não só a cada ~5min.
+            postUsageHistory()
             // Bateria/wifi/modelo: sozinho a cada ~5min (tickCount % 5, mesmo ritmo dos
             // apps instalados), ou na hora se o pai clicou "sincronizar" no header
             // (deviceSyncRequested) — sem esperar o próximo ciclo de 5min.
@@ -106,6 +217,53 @@ class ParentalAccessibilityService : AccessibilityService() {
 
     /** Flags de "atualização forçada" devolvidas pelo poll de regras — ver pollRulesSync. */
     private data class SyncFlags(val forceFreshLocation: Boolean, val forceDeviceSync: Boolean)
+
+    private fun parseScheduleWindow(json: JSONObject?): GuardianPrefs.ScheduleWindow =
+        GuardianPrefs.ScheduleWindow(
+            enabled = json?.optBoolean("enabled", false) ?: false,
+            start = json?.optString("start", "00:00") ?: "00:00",
+            end = json?.optString("end", "00:00") ?: "00:00"
+        )
+
+    /**
+     * Compara o estado local de antes do poll com o que acabou de chegar do backend e
+     * mostra um toast rápido se o pai liberou algo em tempo real (Pausa Geral desativada,
+     * mais minutos concedidos, ou um app desbloqueado) — sem isso a criança só percebe a
+     * mudança se a Home estiver aberta bem na hora e reparar sozinha. Só avisa "pra
+     * melhor": nunca ao bloquear algo, porque isso já fica óbvio na hora que a sobreposição
+     * de bloqueio aparece por conta própria (ver reevaluateBlockState).
+     */
+    private fun notifyRuleChangesIfAny(
+        wasPauseAllActive: Boolean,
+        previousDailyLimit: Int,
+        previousBlockedPackages: Set<String>,
+        isPauseAllActive: Boolean,
+        dailyLimitMinutes: Int,
+        blockedPackages: Set<String>
+    ) {
+        val message = when {
+            wasPauseAllActive && !isPauseAllActive -> "✅ Pausa Geral foi desativada pelos seus pais!"
+            dailyLimitMinutes > previousDailyLimit -> "🎉 Você ganhou mais tempo de tela!"
+            previousBlockedPackages.size > blockedPackages.size -> "🔓 Um aplicativo foi desbloqueado!"
+            else -> null
+        } ?: return
+        tickHandler.post { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
+    }
+
+    /**
+     * Aviso único por dia quando restam poucos minutos de tempo de tela — dá uma chance
+     * de a criança salvar o que estava fazendo antes do bloqueio por tempo esgotado pegar
+     * de surpresa. "Único por dia" pra não repetir a cada tick de 1min enquanto o uso
+     * segue na faixa de aviso (ver GuardianPrefs.hasShownLowTimeWarningToday).
+     */
+    private fun maybeWarnLowTimeRemaining() {
+        if (GuardianPrefs.isPauseAllActive(this) || GuardianPrefs.hasShownLowTimeWarningToday(this)) return
+        val remaining = GuardianPrefs.dailyLimitMinutes(this) - GuardianPrefs.usedMinutesToday(this)
+        if (remaining in 1..5) {
+            GuardianPrefs.markLowTimeWarningShownToday(this)
+            Toast.makeText(this, "⏳ Só restam $remaining minutos de tela hoje!", Toast.LENGTH_LONG).show()
+        }
+    }
 
     /**
      * GET /api/tasks/sync no backend, tentando os mesmos candidatos de servidor usados
@@ -122,6 +280,7 @@ class ParentalAccessibilityService : AccessibilityService() {
                 connection.connectTimeout = 4_000
                 connection.readTimeout = 4_000
                 connection.requestMethod = "GET"
+                GuardianPrefs.deviceToken(this)?.let { connection.setRequestProperty("X-Device-Token", it) }
                 if (connection.responseCode == 200) {
                     val body = connection.inputStream.bufferedReader().use { it.readText() }
                     val json = JSONObject(body)
@@ -129,15 +288,56 @@ class ParentalAccessibilityService : AccessibilityService() {
                     val blockedPackages = (0 until blockedPackagesArray.length())
                         .map { blockedPackagesArray.getString(it) }
                         .toSet()
+                    val alwaysAvailableArray = json.optJSONArray("alwaysAvailablePackages") ?: JSONArray()
+                    val alwaysAvailablePackages = (0 until alwaysAvailableArray.length())
+                        .map { alwaysAvailableArray.getString(it) }
+                        .toSet()
+
+                    // Estado de ANTES de sobrescrever — usado só pra comparar com o que
+                    // acabou de chegar e avisar a criança se o pai liberou algo (ver
+                    // notifyRuleChangesIfAny logo abaixo).
+                    val wasPauseAllActive = GuardianPrefs.isPauseAllActive(this)
+                    val previousDailyLimit = GuardianPrefs.dailyLimitMinutes(this)
+                    val previousBlockedPackages = GuardianPrefs.blockedPackages(this)
+
+                    val newDailyLimit = json.optInt("dailyLimitMinutes", previousDailyLimit)
+                    val newIsPauseAllActive = json.optBoolean("isPauseAllActive", false)
+
                     GuardianPrefs.saveRulesSync(
                         this,
                         unlockMode = json.optString("unlockMode", "off"),
-                        dailyLimitMinutes = json.optInt("dailyLimitMinutes", GuardianPrefs.dailyLimitMinutes(this)),
-                        isPauseAllActive = json.optBoolean("isPauseAllActive", false),
+                        dailyLimitMinutes = newDailyLimit,
+                        isPauseAllActive = newIsPauseAllActive,
                         blockedPackages = blockedPackages,
+                        alwaysAvailablePackages = alwaysAvailablePackages,
                         unlockPinHash = if (json.isNull("unlockPinHash")) null else json.optString("unlockPinHash", null),
-                        rawTasksJson = body
+                        emergencyPhone = if (json.isNull("emergencyPhone")) null else json.optString("emergencyPhone", null),
+                        rawTasksJson = body,
+                        // Ver parent:grant_bonus_time — 0/ausente = nenhuma liberação manual ativa agora.
+                        parentTimeGrantUntil = if (json.isNull("parentTimeGrantUntil")) 0L else json.optLong("parentTimeGrantUntil", 0L),
+                        // "clock" (tempo corrido) ou "usage" (tempo de uso) — ver GuardianPrefs.parentTimeGrantMode.
+                        parentTimeGrantMode = json.optString("parentTimeGrantMode", "clock"),
+                        parentTimeGrantUsageMinutesTotal = json.optInt("parentTimeGrantUsageMinutesTotal", 0),
+                        parentTimeGrantId = json.optLong("parentTimeGrantId", 0L)
                     )
+                    GuardianPrefs.saveScheduleSync(
+                        this,
+                        bedtimeSchedule = parseScheduleWindow(json.optJSONObject("bedtimeSchedule")),
+                        studySchedule = parseScheduleWindow(json.optJSONObject("studySchedule")),
+                        scheduledBlockActive = json.optBoolean("scheduledBlockActive", false),
+                        scheduledBlockLabel = if (json.isNull("scheduledBlockLabel")) null else json.optString("scheduledBlockLabel", null),
+                        scheduledBlockEndsAt = if (json.isNull("scheduledBlockEndsAt")) null else json.optString("scheduledBlockEndsAt", null)
+                    )
+                    notifyRuleChangesIfAny(wasPauseAllActive, previousDailyLimit, previousBlockedPackages, newIsPauseAllActive, newDailyLimit, blockedPackages)
+                    // "Zerar tempo usado hoje" (botão do app do pai) — zera o contador
+                    // LOCAL de verdade (é ele quem decide o bloqueio por tempo esgotado,
+                    // não o valor exibido no painel do pai) e confirma pro backend, pra
+                    // não ficar mandando esse pedido nos próximos polls.
+                    if (json.optBoolean("resetUsageRequested", false)) {
+                        GuardianPrefs.resetUsedMinutesToday(this)
+                        postJson("/api/device/reset-usage-ack", "{}")
+                        tickHandler.post { Toast.makeText(this, "🔄 Seu tempo de tela foi reiniciado!", Toast.LENGTH_LONG).show() }
+                    }
                     // Deixa em cache pra LauncherHomeActivity tentar este endereço primeiro
                     // ao enviar uma foto, em vez de percorrer todos os candidatos de novo.
                     GuardianPrefs.setLastWorkingServerUrl(this, baseUrl)
@@ -174,6 +374,7 @@ class ParentalAccessibilityService : AccessibilityService() {
                 connection.connectTimeout = 5_000
                 connection.readTimeout = 5_000
                 connection.setRequestProperty("Content-Type", "application/json")
+                GuardianPrefs.deviceToken(this)?.let { connection.setRequestProperty("X-Device-Token", it) }
                 connection.outputStream.use { it.write(jsonBody.toByteArray(Charsets.UTF_8)) }
                 if (connection.responseCode == 200) {
                     GuardianPrefs.setLastWorkingServerUrl(this, baseUrl)
@@ -208,16 +409,43 @@ class ParentalAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Manda a fila local de "apps abertos" (ver GuardianPrefs.recordAppOpened) pro
+     * backend e só limpa a fila local se a confirmação chegou — se a rede cair no meio,
+     * a próxima tentativa reenvia tudo de novo (o backend deduplica por timestamp, ver
+     * /api/device/usage-history-sync, então reenviar não duplica nada do lado de lá).
+     */
+    private fun postUsageHistory() {
+        val pending = GuardianPrefs.pendingAppHistoryJson(this)
+        val pendingArray = try { JSONArray(pending) } catch (e: Exception) { JSONArray() }
+        if (pendingArray.length() == 0) return
+        val body = JSONObject().put("history", pendingArray).toString()
+        if (postJson("/api/device/usage-history-sync", body)) {
+            GuardianPrefs.removeAppHistoryEntries(this, pendingArray)
+        }
+    }
+
+    /**
      * POST /api/device/telemetry-sync com bateria, tipo de rede (+ nome do Wi-Fi quando
-     * conectado) e modelo do aparelho — mesmo padrão de "sempre vivo" do postInstalledApps
-     * (antes esses 3 campos só chegavam via 'child:telemetry' da WebView, que quase nunca
-     * abre no uso normal). Roda sozinho a cada ~5min ou na hora quando o pai pede sync.
+     * conectado), modelo do aparelho e tempo de tela usado hoje — mesmo padrão de "sempre
+     * vivo" do postInstalledApps (antes esses campos só chegavam via 'child:telemetry' da
+     * WebView, que quase nunca abre no uso normal — o painel do pai ficava com um número
+     * de "tempo usado" desatualizado o dia inteiro, mesmo o bloqueio por tempo esgotado
+     * já valendo de verdade localmente). Roda sozinho a cada ~5min ou na hora quando o
+     * pai pede sync.
      */
     private fun postDeviceTelemetry() {
         val body = JSONObject()
             .put("batteryLevel", currentBatteryLevel())
             .put("networkType", currentNetworkDescription())
             .put("deviceModel", "${Build.MANUFACTURER} ${Build.MODEL}".trim())
+            .put("usedMinutesToday", GuardianPrefs.usedMinutesToday(this))
+            // Progresso da liberação "tempo de uso" em andamento — só pro app do pai mostrar
+            // "usou Ymin de Xmin liberados" (ver TimeRequestsFragment); o bloqueio em si já
+            // é decidido 100% local (GuardianPrefs.isParentTimeGrantActive), não depende
+            // deste POST chegar. Manda junto o ID da liberação, pra o backend só aceitar o
+            // valor se ainda for a mesma concessão (ver /api/device/telemetry-sync no server).
+            .put("parentTimeGrantId", GuardianPrefs.parentTimeGrantId(this))
+            .put("parentTimeGrantUsageMinutesUsed", GuardianPrefs.parentTimeGrantUsageMinutesUsed(this))
             .toString()
         postJson("/api/device/telemetry-sync", body)
     }
@@ -259,7 +487,7 @@ class ParentalAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Ack de um desbloqueio local por PIN (ver currentBlockReason/pinOverrideDate) —
+     * Ack de um desbloqueio local por PIN (ver currentBlockReason/GuardianPrefs.setPinOverrideUntil) —
      * avisa o backend que o aparelho já foi liberado de verdade, pra o painel do pai
      * não continuar mostrando "Pausa Geral Ativa" quando na prática já foi resolvido.
      * Só limpa a flag local se o ack for confirmado; se a rede cair de novo no meio
@@ -346,25 +574,48 @@ class ParentalAccessibilityService : AccessibilityService() {
 
     /**
      * Motivo atual de bloqueio do aparelho, na prioridade PIN de emergência > Pausa Geral >
-     * Tarefas pendentes > Tempo esgotado — usado tanto pelo ticker (pra travar um app já
-     * aberto quando o motivo muda no meio da sessão) quanto pelo onAccessibilityEvent (pra
-     * decidir travar antes de um app abrir). Retorna null se nada estiver bloqueando.
+     * Horário de Dormir/Estudo > Tarefas pendentes > Tempo esgotado — usado tanto pelo
+     * ticker (pra travar um app já aberto quando o motivo muda no meio da sessão) quanto
+     * pelo onAccessibilityEvent (pra decidir travar antes de um app abrir). Retorna null
+     * se nada estiver bloqueando.
      */
     private fun currentBlockReason(): Pair<String, String>? {
         return when {
-            // Válvula de emergência: se a criança (ou o pai) digitou o PIN certo na
-            // tela de bloqueio hoje, suspende TODOS os motivos abaixo até a virada do
-            // dia — não só Pausa Geral, senão o "nunca mais travar" vira mentira assim
-            // que bater o horário de tarefa pendente ou tempo esgotado de novo.
-            GuardianPrefs.isPinOverrideActiveToday(this) -> null
+            // Válvula de emergência: se o responsável digitou o PIN certo na tela de
+            // bloqueio, suspende TODOS os motivos abaixo pelo tempo que ele escolheu
+            // (10/20/30min, 1h ou personalizado — ver o seletor em LockOverlayService)
+            // — não só Pausa Geral, senão o "liberado" vira mentira assim que bater o
+            // horário de tarefa pendente ou tempo esgotado de novo.
+            GuardianPrefs.isPinOverrideActive(this) -> null
             // Janela curta (poucos minutos) aberta pelo botão "Enviar Foto" da tela de
             // tarefas pendentes — sem isso, o próprio app de câmera do sistema seria
             // barrado de volta pra tela de bloqueio assim que abrisse.
             GuardianPrefs.isTaskSubmissionWindowActive(this) -> null
             GuardianPrefs.isPauseAllActive(this) ->
                 "🔒 DISPOSITIVO BLOQUEADO" to "Pausa Geral Ativa.\nFale com seus pais para liberar o uso."
-            GuardianPrefs.isTaskGateBlocking(this) ->
-                "🔒 TAREFAS PENDENTES" to "Complete e envie todas as tarefas de hoje para liberar o celular."
+            // Horário de Dormir/Estudo — calculado pelo backend a cada poll (relógio do
+            // servidor, não do celular, ver activeScheduleBlock em server.js). Mesma
+            // prioridade/comportamento de Pausa Geral: bloqueia tudo, permite PIN de
+            // emergência (allowPinUnlock=true logo abaixo em reevaluateBlockState).
+            GuardianPrefs.isScheduledBlockActive(this) -> {
+                val label = GuardianPrefs.scheduledBlockLabel(this) ?: "🔒 HORÁRIO BLOQUEADO"
+                val endsAt = GuardianPrefs.scheduledBlockEndsAt(this)
+                val message = if (endsAt != null) "Volta a liberar às $endsAt.\nFale com seus pais se for urgente." else "Fale com seus pais se for urgente."
+                label to message
+            }
+            // Título/ícone diferentes dos outros motivos globais (📋 em vez de 🔒) e a
+            // mensagem cita a(s) tarefa(s) específica(s) por nome — antes era um texto
+            // genérico igual pra qualquer situação, fácil de confundir com Pausa Geral
+            // (foi exatamente essa confusão que motivou essa mudança).
+            GuardianPrefs.isTaskGateBlocking(this) -> {
+                val pending = GuardianPrefs.parsedTodayTasks(this).filter { it.status != "approved" }
+                val detail = when {
+                    pending.size == 1 -> "Falta 1 tarefa: ${pending.first().title}."
+                    pending.isEmpty() -> "Ainda há uma tarefa pendente de hoje."
+                    else -> "Faltam ${pending.size} tarefas de hoje."
+                }
+                "📋 TAREFA PENDENTE" to "$detail\nComplete e envie a foto na lista abaixo para liberar o celular."
+            }
             GuardianPrefs.isDailyLimitExceeded(this) ->
                 "⏳ TEMPO ESGOTADO" to "Você já usou todo o tempo de tela de hoje.\nFale com seus pais para liberar mais tempo."
             else -> null
@@ -373,6 +624,11 @@ class ParentalAccessibilityService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         tickRunnable?.let { tickHandler.removeCallbacks(it) }
+        ruleSyncRunnable?.let { ruleSyncHandler.removeCallbacks(it) }
+        if (screenStateReceiverRegistered) {
+            try { unregisterReceiver(screenStateReceiver) } catch (e: Exception) { /* já desregistrado */ }
+            screenStateReceiverRegistered = false
+        }
         return super.onUnbind(intent)
     }
 
@@ -382,8 +638,68 @@ class ParentalAccessibilityService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val previousPackage = lastForegroundPackage
+
+            // Teclado, câmera padrão do aparelho, diálogo de permissão ou folha de
+            // "compartilhar com" que aparecem POR CIMA de um app já liberado como "sempre
+            // disponível" (ex: digitar ou abrir a câmera dentro do WhatsApp) disparam esse
+            // mesmo evento com o pacote DELES, não do WhatsApp — sem esse filtro,
+            // reevaluateBlockState via isso como "a criança trocou pra um app não liberado"
+            // e reexibia o bloqueio por cima do app que já estava liberado (bug relatado:
+            // WhatsApp acessível, mas digitar/abrir câmera trazia a tela de bloqueio de
+            // volta). Só ignora quando o app de origem era mesmo sempre-disponível — uma
+            // troca de verdade pra outro app bloqueado continua bloqueando normalmente,
+            // porque esse outro app nunca cai em isTransientHelperPackage.
+            if (packageName != previousPackage &&
+                previousPackage != null &&
+                GuardianPrefs.alwaysAvailablePackages(this).contains(previousPackage) &&
+                isTransientHelperPackage(packageName)
+            ) {
+                return
+            }
+
+            // Só registra no histórico numa troca de app DE VERDADE (evita duplicar a
+            // cada evento de acessibilidade solto dentro do mesmo app — diálogos,
+            // trocas de tela internas etc. também disparam TYPE_WINDOW_STATE_CHANGED).
+            // Exclui o próprio GuardianShield: "voltou pra Home" não é um app que o pai
+            // precisa ver no histórico de uso.
+            if (packageName != previousPackage && packageName != this.packageName) {
+                GuardianPrefs.recordAppOpened(this, packageName, getAppNameFromPackage(packageName))
+            }
             lastForegroundPackage = packageName
             reevaluateBlockState()
+        }
+    }
+
+    /**
+     * Teclado (IME padrão) e câmera padrão do aparelho são resolvidos em runtime — funciona
+     * em qualquer fabricante/app padrão escolhido pelo usuário, sem precisar listar pacote
+     * por pacote (ex: teclado da Samsung, Gboard, câmera da Samsung etc.). O resto vem da
+     * lista fixa SYSTEM_HELPER_PACKAGES.
+     */
+    private fun isTransientHelperPackage(packageName: String): Boolean {
+        if (packageName in SYSTEM_HELPER_PACKAGES) return true
+        if (packageName == defaultInputMethodPackage()) return true
+        if (packageName == defaultCameraPackage()) return true
+        return false
+    }
+
+    private fun defaultInputMethodPackage(): String? {
+        val value = try {
+            Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+        } catch (e: Exception) {
+            null
+        }
+        if (value.isNullOrBlank()) return null
+        return value.substringBefore('/').ifBlank { null }
+    }
+
+    private fun defaultCameraPackage(): String? {
+        return try {
+            packageManager.resolveActivity(Intent(MediaStore.ACTION_IMAGE_CAPTURE), PackageManager.MATCH_DEFAULT_ONLY)
+                ?.activityInfo?.packageName
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -396,20 +712,46 @@ class ParentalAccessibilityService : AccessibilityService() {
      */
     private fun reevaluateBlockState() {
         val packageName = lastForegroundPackage ?: return
-        // A Home/Gaveta nativas (pacote do próprio GuardianShield) continuam sendo o
-        // "lugar seguro" durante Pausa Geral/tempo esgotado (comportamento original) —
-        // mas NÃO enquanto houver tarefa pendente/rejeitada: sem essa exceção, a
-        // criança conseguia simplesmente ficar parada na Home ignorando uma tarefa
-        // rejeitada pra sempre, sem nunca ver o aviso de novo (só reaparecia se ela
-        // tentasse abrir outro app). Isso também é o que fecha a sobreposição de volta
-        // assim que a criança volta da câmera com uma foto (ver launchTaskCamera):
-        // ela some na hora do envio, mas essa checagem traz de volta no próximo evento.
-        if (packageName == "com.guardianshield.child" && !GuardianPrefs.isTaskGateBlocking(this)) return
+
+        // Apps marcados pelo pai como "sempre disponível" (ver GuardianPrefs.alwaysAvailablePackages)
+        // furam TODOS os bloqueios — Pausa Geral, tarefas pendentes, tempo esgotado e
+        // bloqueio individual — por isso essa checagem vem antes de qualquer outra e
+        // sempre libera o app na hora, mesmo em meio a um bloqueio global ativo.
+        if (GuardianPrefs.alwaysAvailablePackages(this).contains(packageName)) {
+            hideOverlay()
+            return
+        }
+
+        // A Home/Gaveta nativas (pacote do próprio GuardianShield) NÃO têm mais exceção
+        // especial: um bloqueio geral ativo (Pausa Geral, horário, tarefas pendentes,
+        // tempo esgotado) cobre a Home/Gaveta igual cobre qualquer outro app — apertar o
+        // botão Home ou tentar abrir a gaveta durante um bloqueio volta a mostrar a tela
+        // de bloqueio, não escapa pra trás dela. Segue o fluxo normal aqui embaixo (a
+        // Home só passa incólume quando NENHUM motivo de bloqueio está ativo).
 
         val blockReason = currentBlockReason()
         val blockedPackagesSet = GuardianPrefs.blockedPackages(this)
+        val isBlocked = blockedPackagesSet.contains(packageName) || isPackageBlockedFallback(packageName, blockedPackagesSet)
 
         Log.d("GuardianShield", "App em 1º plano: $packageName | Bloqueio: ${blockReason?.first ?: "nenhum"} | Bloqueados: $blockedPackagesSet")
+
+        // 0. Configurações do Android (com.android.settings) continuam SEMPRE alcançáveis
+        // em meio a qualquer bloqueio — geral ou individual — desde que o PIN dos pais seja
+        // digitado ali mesmo, ou até que o pai libere pelo app. Sem essa exceção, um
+        // bloqueio travado de verdade (regra esquecida ligada, ou um bug) não teria como
+        // ser corrigido no próprio aparelho — nem pra revogar autorização do adb, nem pra
+        // desligar a Acessibilidade se precisar (foi exatamente o que aconteceu num teste).
+        // allowPinUnlock=true incondicional aqui, mesmo quando o motivo normal do bloqueio
+        // não permitiria PIN (ex: app individual bloqueado) — Configurações é sempre exceção.
+        if (packageName in SETTINGS_PACKAGES && (blockReason != null || isBlocked)) {
+            val message = if (GuardianPrefs.hasUnlockPinConfigured(this))
+                "Digite o PIN dos seus pais pra continuar, ou peça pra eles liberarem pelo app."
+            else
+                "Peça pra seus pais liberarem pelo app do GuardianShield (nenhum PIN foi configurado ainda)."
+            showOverlay("🔧 CONFIGURAÇÕES PROTEGIDAS", message, allowPinUnlock = true, iconType = "settings")
+            bringGuardianShieldToFront()
+            return
+        }
 
         // 1. Se algum motivo global estiver bloqueando (Pausa Geral, tarefas pendentes
         // ou tempo esgotado), nenhum app pode ser aberto (exceto o próprio Guardian Shield).
@@ -421,7 +763,8 @@ class ParentalAccessibilityService : AccessibilityService() {
             // O motivo específico "tarefas pendentes" ganha a lista de tarefas + botão
             // de enviar foto na sobreposição (ver LockOverlayService) — os outros dois
             // motivos globais (Pausa Geral, tempo esgotado) não têm o que mostrar aqui.
-            showOverlay(title, message, allowPinUnlock = true, allowTaskSubmission = GuardianPrefs.isTaskGateBlocking(this))
+            val isTaskGate = GuardianPrefs.isTaskGateBlocking(this)
+            showOverlay(title, message, allowPinUnlock = true, allowTaskSubmission = isTaskGate, iconType = if (isTaskGate) "tasks" else "lock")
             bringGuardianShieldToFront()
             return
         }
@@ -430,12 +773,10 @@ class ParentalAccessibilityService : AccessibilityService() {
         // individualmente. allowPinUnlock=false aqui: o PIN de emergência é pra
         // destravar o aparelho, não pra liberar um app específico que o pai escolheu
         // bloquear de propósito (ver currentBlockReason, que não olha pra isso).
-        val isBlocked = blockedPackagesSet.contains(packageName) || isPackageBlockedFallback(packageName, blockedPackagesSet)
-
         if (isBlocked) {
             Log.w("GuardianShield", "App Bloqueado Detectado: $packageName. Exibindo tela de bloqueio do app!")
             val appLabel = getAppNameFromPackage(packageName)
-            showOverlay("🔒 APLICATIVO BLOQUEADO", "O aplicativo $appLabel foi bloqueado pelos seus pais.", allowPinUnlock = false)
+            showOverlay("$appLabel bloqueado", "Esse aplicativo foi bloqueado pelos seus pais.", allowPinUnlock = false, iconType = "blocked")
             bringGuardianShieldToFront()
         } else {
             // App permitido (ou o bloqueio acabou de ser removido pelo pai) — remove a
@@ -444,19 +785,22 @@ class ParentalAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun isPackageBlockedFallback(pkg: String, blockedSet: Set<String>): Boolean {
-        for (blocked in blockedSet) {
-            val bLower = blocked.lowercase()
-            val pkgLower = pkg.lowercase()
-            if (pkgLower == bLower) return true
-            if ((bLower.contains("tiktok") || bLower.contains("musically")) &&
-                (pkgLower.contains("musically") || pkgLower.contains("trill") || pkgLower.contains("tiktok"))) return true
-            if (bLower.contains("instagram") && pkgLower.contains("instagram")) return true
-            if (bLower.contains("youtube") && pkgLower.contains("youtube")) return true
-            if (bLower.contains("freefire") && pkgLower.contains("freefire")) return true
-        }
-        return false
-    }
+    /**
+     * Camada de segurança sobre o Set.contains exato (case-sensitive) acima — só cobre uma
+     * comparação insensível a maiúsculas/minúsculas, caso algum evento de acessibilidade
+     * estranho traga o pacote com uma grafia diferente da instalada.
+     *
+     * NÃO faz mais comparação por substring ("tiktok"/"instagram"/"youtube"/"freefire" no
+     * meio do nome do pacote, como antes) — removido de propósito: blockedPackages sempre
+     * chega aqui como o nome de pacote REAL e completo que o pai escolheu na lista de apps
+     * sincronizada do próprio aparelho da criança (ver postInstalledApps acima e
+     * AppsFragment no parent-app-native, que só oferece pra bloquear apps que já vieram
+     * desse apps-sync) — nunca um termo solto tipo "tiktok". A heurística de substring só
+     * trazia risco de SUPERBLOQUEAR apps que o pai nunca escolheu: bloquear "youtube" batia
+     * também no YouTube Music e no YouTube Kids, que são pacotes totalmente diferentes.
+     */
+    private fun isPackageBlockedFallback(pkg: String, blockedSet: Set<String>): Boolean =
+        blockedSet.any { it.equals(pkg, ignoreCase = true) }
 
     private fun getAppNameFromPackage(packageName: String): String {
         return try {
@@ -471,13 +815,14 @@ class ParentalAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun showOverlay(title: String, message: String, allowPinUnlock: Boolean, allowTaskSubmission: Boolean = false) {
+    private fun showOverlay(title: String, message: String, allowPinUnlock: Boolean, allowTaskSubmission: Boolean = false, iconType: String = "lock") {
         val overlayIntent = Intent(this, LockOverlayService::class.java)
         overlayIntent.action = "SHOW_OVERLAY"
         overlayIntent.putExtra("title", title)
         overlayIntent.putExtra("message", message)
         overlayIntent.putExtra("allowPinUnlock", allowPinUnlock)
         overlayIntent.putExtra("allowTaskSubmission", allowTaskSubmission)
+        overlayIntent.putExtra("iconType", iconType)
         startService(overlayIntent)
     }
 
@@ -487,9 +832,15 @@ class ParentalAccessibilityService : AccessibilityService() {
         startService(overlayIntent)
     }
 
+    /**
+     * Traz a Home nativa pra frente — é o "lugar seguro" pra onde a criança deve voltar
+     * quando um app é bloqueado (e rede de segurança pro caso da sobreposição não
+     * conseguir aparecer, ex: permissão SYSTEM_ALERT_WINDOW revogada — pelo menos o app
+     * bloqueado sai do 1º plano mesmo assim). A própria Home, ao vir pra frente, passa
+     * de novo por reevaluateBlockState (novo evento de acessibilidade) e mostra a
+     * sobreposição por cima dela também, já que ela não tem mais exceção especial.
+     */
     private fun bringGuardianShieldToFront() {
-        // Traz a Home nativa (LauncherHomeActivity) para frente — é o "lugar seguro"
-        // pra onde a criança deve voltar quando um app é bloqueado.
         val intent = Intent(this, LauncherHomeActivity::class.java)
         intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         startActivity(intent)

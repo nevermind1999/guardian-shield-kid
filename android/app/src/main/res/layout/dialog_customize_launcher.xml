@@ -65,6 +65,25 @@
             android:textSize="11sp"
             android:layout_marginBottom="10dp" />
 
+        <!-- Preview em miniatura do vídeo ATUALMENTE aplicado (não do que está sendo
+             escolhido — isso já tem sua própria prévia em tela cheia na simulação de
+             recorte, ver VideoCropActivity). Só existe pra dar visibilidade do que já
+             está configurado sem precisar sair do diálogo. Escondida quando não há
+             vídeo (ver showCustomizeDialog em LauncherHomeActivity). -->
+        <FrameLayout
+            android:id="@+id/videoPreviewContainer"
+            android:layout_width="120dp"
+            android:layout_height="76dp"
+            android:layout_marginBottom="12dp"
+            android:background="@drawable/bg_app_icon"
+            android:visibility="gone">
+
+            <TextureView
+                android:id="@+id/videoPreviewThumb"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+        </FrameLayout>
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

@@ -1,5 +1,6 @@
 package com.guardianshield.child
 
+import android.Manifest
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.app.AlertDialog
@@ -8,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.SurfaceTexture
@@ -19,6 +21,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Base64
 import android.view.GestureDetector
 import android.view.MotionEvent
@@ -34,6 +37,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.GestureDetectorCompat
 import androidx.core.view.ViewCompat
@@ -46,6 +50,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.guardianshield.child.model.AppEntry
 import com.guardianshield.child.util.AppRepository
 import com.guardianshield.child.util.GuardianPrefs
+import com.guardianshield.child.util.PermissionWatchdog
 import com.guardianshield.child.util.ServerConfig
 import com.guardianshield.child.util.VideoTransform
 import org.json.JSONObject
@@ -72,8 +77,11 @@ class LauncherHomeActivity : AppCompatActivity() {
 
     private lateinit var prefs: SharedPreferences
     private var apps: List<AppEntry> = emptyList()
-    private lateinit var homeAdapter: AppGridAdapter
+    private lateinit var homeAdapter: HomeGridAdapter
     private lateinit var itemTouchHelper: ItemTouchHelper
+    // Posição que o item arrastado está sobrepondo forte o bastante pra virar pasta se
+    // solto agora — ver setupDragToReorder. Null = arrastar normal (só reordena).
+    private var pendingMergeTargetPosition: Int? = null
 
     private val Int.dp: Int
         get() = (this * resources.displayMetrics.density).toInt()
@@ -82,7 +90,12 @@ class LauncherHomeActivity : AppCompatActivity() {
     private lateinit var dateText: TextView
     private lateinit var batteryText: TextView
     private lateinit var remainingTimeText: TextView
+    private lateinit var timeProgressBar: android.widget.ProgressBar
     private lateinit var requestTimeButton: Button
+    private lateinit var emergencyCallButton: ImageButton
+    private lateinit var nextScheduleHint: TextView
+    private lateinit var permissionWarningBanner: View
+    private lateinit var permissionWarningText: TextView
     private lateinit var drawerHandle: View
     private lateinit var homeGridRecyclerView: RecyclerView
     private lateinit var emptyHomeHint: View
@@ -95,6 +108,7 @@ class LauncherHomeActivity : AppCompatActivity() {
 
     // --- Tarefas diárias: widget na Home + captura/envio de foto de comprovação ---
     private lateinit var tasksSectionContainer: View
+    private lateinit var tasksSectionTitle: TextView
     private lateinit var tasksRecyclerView: RecyclerView
     private lateinit var taskAdapter: TaskCardAdapter
     private var pendingPhotoTaskId: String? = null
@@ -104,6 +118,11 @@ class LauncherHomeActivity : AppCompatActivity() {
     // (GuardianPrefs) refletir o novo status; evita a criança achar que o toque não fez nada.
     private val locallySubmittedTaskIds = mutableSetOf<String>()
     private val taskSubmitExecutor = Executors.newSingleThreadExecutor()
+
+    // Best-effort: se a criança/pai negar, o PermissionWatchdog simplesmente não consegue
+    // mostrar a notificação (sem crash, ver runCheckAndNotify) e o banner pulsante da Home
+    // continua sendo o único aviso — não insiste pedindo de novo depois de uma negativa.
+    private val notificationPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     private val takeTaskPhotoLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         // De volta da câmera (com foto ou cancelado) — a janela de exceção do bloqueio
@@ -147,6 +166,11 @@ class LauncherHomeActivity : AppCompatActivity() {
     private val clockTick = object : Runnable {
         override fun run() {
             updateClock()
+            // Sem isso, "tempo restante" só era recalculado no onCreate/onResume e no
+            // batteryReceiver (bateria mudar de %) — enquanto a criança ficava parada na
+            // Home, o contador congelava e só "andava" de vez em quando por acidente, em
+            // vez de acompanhar o ticker de uso de 1min do ParentalAccessibilityService.
+            updateBatteryAndTime()
             clockHandler.postDelayed(this, 30_000)
         }
     }
@@ -168,6 +192,18 @@ class LauncherHomeActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Dispara em qualquer desinstalação no aparelho (pelo menu de contexto acima, pelas
+     * Configurações do sistema, ou por qualquer outro caminho) — recarrega a lista real
+     * de apps e tira o ícone da Home na hora, em vez de deixar um ícone morto até a
+     * criança reabrir o launcher e notar que ele não funciona mais.
+     */
+    private val packageChangeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            refreshInstalledAppsAndGrid()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -183,12 +219,19 @@ class LauncherHomeActivity : AppCompatActivity() {
         dateText = findViewById(R.id.dateText)
         batteryText = findViewById(R.id.batteryText)
         remainingTimeText = findViewById(R.id.remainingTimeText)
+        timeProgressBar = findViewById(R.id.timeProgressBar)
         requestTimeButton = findViewById(R.id.requestTimeButton)
+        emergencyCallButton = findViewById(R.id.emergencyCallButton)
+        nextScheduleHint = findViewById(R.id.nextScheduleHint)
+        permissionWarningBanner = findViewById(R.id.permissionWarningBanner)
+        permissionWarningText = findViewById(R.id.permissionWarningText)
+        setupPermissionWarningPulse()
         drawerHandle = findViewById(R.id.drawerHandle)
         homeGridRecyclerView = findViewById(R.id.homeGridRecyclerView)
         emptyHomeHint = findViewById(R.id.emptyHomeHint)
         videoWallpaper = findViewById(R.id.videoWallpaper)
         tasksSectionContainer = findViewById(R.id.tasksSectionContainer)
+        tasksSectionTitle = findViewById(R.id.tasksSectionTitle)
         tasksRecyclerView = findViewById(R.id.tasksRecyclerView)
 
         val contentColumn = findViewById<LinearLayout>(R.id.contentColumn)
@@ -203,6 +246,7 @@ class LauncherHomeActivity : AppCompatActivity() {
         findViewById<ImageButton>(R.id.settingsButton).setOnClickListener {
             startActivity(Intent(this, MainActivity::class.java))
         }
+        emergencyCallButton.setOnClickListener { callEmergencyNumber() }
         findViewById<ImageButton>(R.id.paletteButton).setOnClickListener {
             showCustomizeDialog()
         }
@@ -233,10 +277,13 @@ class LauncherHomeActivity : AppCompatActivity() {
         if (!GuardianPrefs.hasInitializedPinnedApps(this) && apps.isNotEmpty()) {
             GuardianPrefs.setPinnedHomeApps(this, apps.take(8).map { it.packageName })
         }
-        homeAdapter = AppGridAdapter(
-            allApps = emptyList(),
-            onLaunch = { app -> AppRepository.launch(this, app.packageName) },
-            onLongPress = { app, holder -> showAppOptionsMenu(app, holder) }
+        homeAdapter = HomeGridAdapter(
+            items = emptyList(),
+            appsByPackage = emptyMap(),
+            onLaunchApp = { app -> AppRepository.launch(this, app.packageName) },
+            onOpenFolder = { folder -> showFolderContents(folder) },
+            onLongPressApp = { app, holder -> showAppOptionsMenu(app, holder) },
+            onLongPressFolder = { folder, holder -> showFolderOptionsMenu(folder, holder) }
         )
         homeGridRecyclerView.adapter = homeAdapter
         setupDragToReorder()
@@ -250,6 +297,18 @@ class LauncherHomeActivity : AppCompatActivity() {
         refreshHomeGrid()
         setupVideoWallpaper()
         handleTaskCameraIntentExtra(intent)
+
+        // Liga o watchdog externo de permissões (ver PermissionWatchdog) — redundante de
+        // propósito com a chamada em ParentalAccessibilityService.onServiceConnected, pra
+        // cobrir também o caso de a Home ser a primeira coisa a abrir depois de uma
+        // instalação nova, antes mesmo da Acessibilidade ter sido concedida ainda.
+        PermissionWatchdog.scheduleRepeating(this)
+        PermissionWatchdog.runCheckAndNotify(this)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     // A Activity é singleTask (ver AndroidManifest), então re-lançamentos (ex: pela
@@ -279,8 +338,13 @@ class LauncherHomeActivity : AppCompatActivity() {
         super.onResume()
         prefs.registerOnSharedPreferenceChangeListener(prefsListener)
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val packageFilter = IntentFilter(Intent.ACTION_PACKAGE_REMOVED).apply { addDataScheme("package") }
+        registerReceiver(packageChangeReceiver, packageFilter)
         clockHandler.post(clockTick)
-        refreshHomeGrid()
+        // A lista de apps pode ter mudado enquanto a Home estava em segundo plano (app
+        // instalado/desinstalado por fora) — recarrega sempre que a Home volta a aparecer,
+        // além de reagir na hora via packageChangeReceiver enquanto está em primeiro plano.
+        refreshInstalledAppsAndGrid()
         resumeVideoWallpaper()
     }
 
@@ -289,6 +353,11 @@ class LauncherHomeActivity : AppCompatActivity() {
         prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
         try {
             unregisterReceiver(batteryReceiver)
+        } catch (e: IllegalArgumentException) {
+            // já estava desregistrado, nada a fazer
+        }
+        try {
+            unregisterReceiver(packageChangeReceiver)
         } catch (e: IllegalArgumentException) {
             // já estava desregistrado, nada a fazer
         }
@@ -310,7 +379,7 @@ class LauncherHomeActivity : AppCompatActivity() {
 
     private fun openDrawer() {
         startActivity(Intent(this, LauncherDrawerActivity::class.java))
-        overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
+        overridePendingTransition(R.anim.slide_up_in, R.anim.stay_still)
     }
 
     // ============================== GAVETA: gesto de arrastar ==============================
@@ -364,13 +433,21 @@ class LauncherHomeActivity : AppCompatActivity() {
 
     // ============================== GRID DA HOME: mover / remover ==============================
 
-    /** Arrastar um ícone (chamado explicitamente via menu "Mover") reordena a grade ao vivo. */
+    /**
+     * Arrastar um ícone (chamado explicitamente via menu "Mover") reordena a grade ao
+     * vivo — e, se soltar bem em cima de outro ícone (>50% de sobreposição), os dois se
+     * juntam numa pasta nova em vez de só trocar de lugar. Enquanto a sobreposição não é
+     * forte o bastante pra virar pasta, o comportamento é o de sempre (empurra os outros
+     * ícones, reordena). O destaque visual de "solte aqui pra criar pasta" é o próprio
+     * HomeGridAdapter.setHoverTarget (ícone alvo cresce um pouco).
+     */
     private fun setupDragToReorder() {
         val callback = object : ItemTouchHelper.SimpleCallback(
             ItemTouchHelper.UP or ItemTouchHelper.DOWN or ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT, 0
         ) {
             // Desligado: o arrastar só começa quando o usuário escolhe "Mover" no menu do
-            // toque e segure (showAppOptionsMenu), não automaticamente em qualquer toque longo.
+            // toque e segure (showAppOptionsMenu/showFolderOptionsMenu), não
+            // automaticamente em qualquer toque longo.
             override fun isLongPressDragEnabled() = false
 
             override fun onMove(
@@ -378,21 +455,60 @@ class LauncherHomeActivity : AppCompatActivity() {
                 viewHolder: RecyclerView.ViewHolder,
                 target: RecyclerView.ViewHolder
             ): Boolean {
-                homeAdapter.moveItem(viewHolder.bindingAdapterPosition, target.bindingAdapterPosition)
+                val draggedPos = viewHolder.bindingAdapterPosition
+                val targetPos = target.bindingAdapterPosition
+                if (draggedPos == RecyclerView.NO_POSITION || targetPos == RecyclerView.NO_POSITION) return false
+
+                val draggedItem = homeAdapter.itemAt(draggedPos)
+                val targetItem = homeAdapter.itemAt(targetPos)
+                val canMerge = !(draggedItem is GuardianPrefs.HomeItem.FolderItem && targetItem is GuardianPrefs.HomeItem.FolderItem)
+
+                if (canMerge && overlapFraction(viewHolder.itemView, target.itemView) > MERGE_OVERLAP_THRESHOLD) {
+                    pendingMergeTargetPosition = targetPos
+                    homeAdapter.setHoverTarget(targetPos)
+                    return false // segura o arrasto pairando ali, sem empurrar a grade
+                }
+                pendingMergeTargetPosition = null
+                homeAdapter.setHoverTarget(null)
+                homeAdapter.moveItem(draggedPos, targetPos)
                 return true
             }
 
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
-                // Não usamos swipe-para-remover — só arrastar pra reordenar.
+                // Não usamos swipe-para-remover — só arrastar pra reordenar/juntar.
             }
 
             override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
                 super.clearView(recyclerView, viewHolder)
-                GuardianPrefs.setPinnedHomeApps(this@LauncherHomeActivity, homeAdapter.currentPackageOrder())
+                val mergeTarget = pendingMergeTargetPosition
+                pendingMergeTargetPosition = null
+                homeAdapter.setHoverTarget(null)
+                val draggedPos = viewHolder.bindingAdapterPosition
+                if (mergeTarget != null && draggedPos != RecyclerView.NO_POSITION && draggedPos != mergeTarget) {
+                    homeAdapter.mergeIntoFolder(draggedPos, mergeTarget)
+                    Toast.makeText(this@LauncherHomeActivity, "📁 Pasta criada", Toast.LENGTH_SHORT).show()
+                }
+                GuardianPrefs.setHomeLayout(this@LauncherHomeActivity, homeAdapter.currentItems())
             }
         }
         itemTouchHelper = ItemTouchHelper(callback)
         itemTouchHelper.attachToRecyclerView(homeGridRecyclerView)
+    }
+
+    /** Fração da área de [target] coberta por [dragged] agora — usa x/y (não left/top),
+     * que já refletem a translação visual do arrastar do ItemTouchHelper. */
+    private fun overlapFraction(dragged: View, target: View): Float {
+        val left = maxOf(dragged.x, target.x)
+        val top = maxOf(dragged.y, target.y)
+        val right = minOf(dragged.x + dragged.width, target.x + target.width)
+        val bottom = minOf(dragged.y + dragged.height, target.y + target.height)
+        val intersection = (right - left).coerceAtLeast(0f) * (bottom - top).coerceAtLeast(0f)
+        val targetArea = target.width * target.height
+        return if (targetArea == 0) 0f else intersection / targetArea
+    }
+
+    companion object {
+        private const val MERGE_OVERLAP_THRESHOLD = 0.5f
     }
 
     /** Toque e segure num app da Home: mostra as opções em vez de simplesmente sumir com ele. */
@@ -400,6 +516,7 @@ class LauncherHomeActivity : AppCompatActivity() {
         val popup = PopupMenu(this, holder.itemView)
         popup.menu.add(0, 1, 0, "Mover")
         popup.menu.add(0, 2, 1, "Remover da tela inicial")
+        popup.menu.add(0, 3, 2, "Desinstalar")
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 1 -> itemTouchHelper.startDrag(holder)
@@ -407,10 +524,124 @@ class LauncherHomeActivity : AppCompatActivity() {
                     GuardianPrefs.unpin(this, app.packageName)
                     refreshHomeGrid()
                 }
+                3 -> uninstallApp(app)
             }
             true
         }
         popup.show()
+    }
+
+    /**
+     * Abre o diálogo padrão do sistema pra desinstalar — mesmo comportamento de qualquer
+     * launcher (Nova, Pixel Launcher, etc). Não desinstala silenciosamente: o sistema
+     * sempre exige confirmação explícita do usuário nessa tela antes de remover o app.
+     * O ícone some da Home sozinho assim que a desinstalação é confirmada (ver
+     * packageChangeReceiver, registrado em onResume).
+     */
+    private fun uninstallApp(app: AppEntry) {
+        try {
+            startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:${app.packageName}")))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Não foi possível abrir a desinstalação de ${app.label}.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Toque e segure numa pasta da Home: mover (arrastar) ou desfazer, sem precisar
+     * abrir a pasta primeiro — espelha showAppOptionsMenu acima. */
+    private fun showFolderOptionsMenu(folder: GuardianPrefs.HomeItem.FolderItem, holder: RecyclerView.ViewHolder) {
+        val popup = PopupMenu(this, holder.itemView)
+        popup.menu.add(0, 1, 0, "Mover")
+        popup.menu.add(0, 2, 1, "Desfazer pasta")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                1 -> itemTouchHelper.startDrag(holder)
+                2 -> {
+                    homeAdapter.dissolveFolder(folder.id)
+                    GuardianPrefs.setHomeLayout(this, homeAdapter.currentItems())
+                }
+            }
+            true
+        }
+        popup.show()
+    }
+
+    /**
+     * Abre o conteúdo de uma pasta: tocar num app de dentro fecha o diálogo e abre o app;
+     * toque e segure oferece tirar da pasta ou desinstalar; "Renomear" pede um novo nome;
+     * "Desfazer pasta" solta todos os apps de volta soltos na grade, no lugar da pasta.
+     */
+    private fun showFolderContents(folder: GuardianPrefs.HomeItem.FolderItem) {
+        val view = layoutInflater.inflate(R.layout.dialog_folder_contents, null)
+        val dialog = AlertDialog.Builder(this).setView(view).create()
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+
+        val titleText = view.findViewById<TextView>(R.id.folderDialogTitle)
+        val recyclerView = view.findViewById<RecyclerView>(R.id.folderContentsRecyclerView)
+        titleText.text = folder.name
+
+        // Re-lê a pasta atual do adapter a cada chamada (em vez de fechar sobre a cópia
+        // recebida no toque) — assim remover um app de dentro e continuar no diálogo
+        // reflete o estado real sem precisar fechar e reabrir.
+        fun currentFolder(): GuardianPrefs.HomeItem.FolderItem? =
+            homeAdapter.currentItems().filterIsInstance<GuardianPrefs.HomeItem.FolderItem>().find { it.id == folder.id }
+
+        val appsByPackage = apps.associateBy { it.packageName }
+        val contentsAdapter = AppGridAdapter(
+            allApps = folder.packages.mapNotNull { appsByPackage[it] },
+            onLaunch = { app -> dialog.dismiss(); AppRepository.launch(this, app.packageName) },
+            onLongPress = { app, appHolder ->
+                val optionsPopup = PopupMenu(this, appHolder.itemView)
+                optionsPopup.menu.add(0, 1, 0, "Tirar da pasta")
+                optionsPopup.menu.add(0, 2, 1, "Desinstalar")
+                optionsPopup.setOnMenuItemClickListener { item ->
+                    when (item.itemId) {
+                        1 -> {
+                            val remaining = currentFolder()?.packages?.filterNot { it == app.packageName } ?: emptyList()
+                            homeAdapter.replaceFolder(folder.id, newPackages = remaining)
+                            GuardianPrefs.setHomeLayout(this, homeAdapter.currentItems())
+                            if (remaining.size <= 1) {
+                                dialog.dismiss() // a pasta se desfez sozinha (0 ou 1 app não é mais pasta)
+                            } else {
+                                (recyclerView.adapter as? AppGridAdapter)?.updatePinnedApps(remaining.mapNotNull { appsByPackage[it] })
+                            }
+                        }
+                        2 -> uninstallApp(app)
+                    }
+                    true
+                }
+                optionsPopup.show()
+            }
+        )
+        recyclerView.layoutManager = GridLayoutManager(this, 4)
+        recyclerView.adapter = contentsAdapter
+        contentsAdapter.updateBlockedState(GuardianPrefs.blockedPackages(this), GuardianPrefs.isPauseAllActive(this), GuardianPrefs.alwaysAvailablePackages(this))
+
+        view.findViewById<TextView>(R.id.folderRenameButton).setOnClickListener {
+            val input = android.widget.EditText(this)
+            input.setText(folder.name)
+            input.setTextColor(0xFFFFFFFF.toInt())
+            AlertDialog.Builder(this)
+                .setTitle("Renomear pasta")
+                .setView(input)
+                .setPositiveButton("Salvar") { _, _ ->
+                    val newName = input.text.toString().trim()
+                    if (newName.isNotEmpty()) {
+                        homeAdapter.replaceFolder(folder.id, newName = newName)
+                        GuardianPrefs.setHomeLayout(this, homeAdapter.currentItems())
+                        titleText.text = newName
+                    }
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+        }
+
+        view.findViewById<TextView>(R.id.folderDissolveButton).setOnClickListener {
+            homeAdapter.dissolveFolder(folder.id)
+            GuardianPrefs.setHomeLayout(this, homeAdapter.currentItems())
+            dialog.dismiss()
+        }
+
+        dialog.show()
     }
 
     private fun updateClock() {
@@ -430,21 +661,156 @@ class LauncherHomeActivity : AppCompatActivity() {
         val used = GuardianPrefs.usedMinutesToday(this)
         val remaining = (dailyLimit - used).coerceAtLeast(0)
         remainingTimeText.text = "⏳ ${remaining / 60}h ${remaining % 60}m restantes"
+
+        // Verde -> âmbar -> vermelho conforme o tempo usado hoje se aproxima do limite,
+        // pra dar um aviso visual antes do bloqueio por tempo esgotado pegar de surpresa.
+        val ratio = if (dailyLimit > 0) (used.toFloat() / dailyLimit.toFloat()).coerceIn(0f, 1f) else 0f
+        timeProgressBar.progress = (ratio * timeProgressBar.max).toInt()
+        val color = when {
+            ratio >= 0.9f -> 0xFFF43F5E.toInt() // vermelho/rosa
+            ratio >= 0.7f -> 0xFFEAB308.toInt() // âmbar
+            else -> 0xFF10B981.toInt() // verde
+        }
+        timeProgressBar.progressTintList = android.content.res.ColorStateList.valueOf(color)
+
+        emergencyCallButton.visibility = if (GuardianPrefs.emergencyPhone(this) != null) View.VISIBLE else View.GONE
+    }
+
+    /** Mesmo comportamento do botão da tela de bloqueio (LockOverlayService.callEmergencyNumber):
+     * abre o discador já preenchido, sem ligar sozinho — não precisa da permissão CALL_PHONE. */
+    private fun callEmergencyNumber() {
+        val phone = GuardianPrefs.emergencyPhone(this) ?: return
+        try {
+            startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$phone")))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Não foi possível abrir o discador.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * Recarrega a lista real de apps instalados (PackageManager) e limpa da lista de
+     * fixados persistida qualquer pacote que não exista mais — sem isso, um app
+     * desinstalado ficaria "fixado" pra sempre em GuardianPrefs (só não aparecia porque
+     * refreshHomeGrid já filtra pelo mapa de apps atuais, mas o registro morto continuaria
+     * acumulando ali indefinidamente).
+     */
+    private fun refreshInstalledAppsAndGrid() {
+        apps = AppRepository.loadLaunchableApps(this)
+        val installedPackages = apps.map { it.packageName }.toSet()
+        val currentPinned = GuardianPrefs.pinnedHomeApps(this)
+        val cleanedPinned = currentPinned.filter { it in installedPackages }
+        if (cleanedPinned.size != currentPinned.size) {
+            GuardianPrefs.setPinnedHomeApps(this, cleanedPinned)
+        }
+        refreshHomeGrid()
     }
 
     private fun refreshHomeGrid() {
         updateBatteryAndTime()
-        val pinnedOrder = GuardianPrefs.pinnedHomeApps(this)
+        val items = GuardianPrefs.homeLayout(this)
         val appsByPackage = apps.associateBy { it.packageName }
-        val pinnedApps = pinnedOrder.mapNotNull { appsByPackage[it] }
-        homeAdapter.updatePinnedApps(pinnedApps)
-        homeAdapter.updateBlockedState(GuardianPrefs.blockedPackages(this), GuardianPrefs.isPauseAllActive(this))
+        homeAdapter.updateItems(items, appsByPackage)
+        homeAdapter.updateBlockedState(GuardianPrefs.blockedPackages(this), GuardianPrefs.isPauseAllActive(this), GuardianPrefs.alwaysAvailablePackages(this))
 
-        val isEmpty = pinnedApps.isEmpty()
+        val isEmpty = items.isEmpty()
         homeGridRecyclerView.visibility = if (isEmpty) View.GONE else View.VISIBLE
         emptyHomeHint.visibility = if (isEmpty) View.VISIBLE else View.GONE
 
         refreshTasksWidget()
+        refreshScheduleHint()
+        refreshPermissionWarning()
+    }
+
+    /**
+     * Sem Acessibilidade ou "Aparecer sobre outros apps" concedidas, o bloqueio inteiro
+     * falha silenciosamente — a criança abre qualquer coisa achando que está tudo normal,
+     * e o pai nem fica sabendo que a proteção não está funcionando. Esse banner insistente
+     * avisa direto na Home (única coisa impossível de não ver) em vez de deixar isso
+     * invisível, e leva com um toque pra tela de sistema certa pra resolver.
+     */
+    private fun refreshPermissionWarning() {
+        val accessibilityGranted = isAccessibilityServiceEnabled()
+        val overlayGranted = Settings.canDrawOverlays(this)
+
+        if (accessibilityGranted && overlayGranted) {
+            permissionWarningBanner.visibility = View.GONE
+            return
+        }
+
+        permissionWarningBanner.visibility = View.VISIBLE
+        val missing = mutableListOf<String>()
+        if (!accessibilityGranted) missing.add("Acessibilidade")
+        if (!overlayGranted) missing.add("Aparecer sobre outros apps")
+        permissionWarningText.text = "⚠️ Sem ${missing.joinToString(" e ")}, o bloqueio não funciona. Toque pra corrigir."
+
+        // Acessibilidade primeiro se as duas faltarem — é a mais crítica (sem ela nada é
+        // detectado/bloqueado de verdade; sem a de sobreposição "só" a tela de bloqueio
+        // não aparece, mas o app ainda é fechado/trocado pela Home).
+        permissionWarningBanner.setOnClickListener {
+            val intent = if (!accessibilityGranted) {
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            } else {
+                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            }
+            startActivity(intent)
+        }
+    }
+
+    // Movido pra PermissionWatchdog (util compartilhado) — reusado também pelo watchdog
+    // externo que roda independente da Home estar aberta, ver PermissionWatchdog.kt.
+    private fun isAccessibilityServiceEnabled(): Boolean = PermissionWatchdog.isAccessibilityServiceEnabled(this)
+
+    /** Pulso sutil de opacidade, infinito — pro banner de permissão faltando ser
+     * "insistente" o bastante pra não passar despercebido, igual o chevron da gaveta. */
+    private fun setupPermissionWarningPulse() {
+        val pulse = ObjectAnimator.ofFloat(permissionWarningBanner, "alpha", 1f, 0.55f, 1f)
+        pulse.duration = 1200
+        pulse.repeatCount = ValueAnimator.INFINITE
+        pulse.start()
+    }
+
+    /** "Próximo bloqueio agendado" — ver comentário no layout (nextScheduleHint). */
+    private fun refreshScheduleHint() {
+        if (GuardianPrefs.isScheduledBlockActive(this)) {
+            // Bloqueio agendado já ativo agora: a sobreposição de bloqueio está cobrindo
+            // a tela nesse exato momento, então mostrar "próximo bloqueio" aqui não faz
+            // sentido (a Home nem deveria estar visível por baixo dela).
+            nextScheduleHint.visibility = View.GONE
+            return
+        }
+        val label = nextScheduledBlockLabel()
+        nextScheduleHint.text = label
+        nextScheduleHint.visibility = if (label != null) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * "🌙 Horário de Dormir às 22:00" (ou Estudo, o que vier primeiro) — usa o relógio do
+     * próprio aparelho, só pra dar um aviso prévio; quem decide o bloqueio de verdade é
+     * sempre o backend (ver GuardianPrefs.isScheduledBlockActive). Retorna null se nenhum
+     * dos dois horários estiver habilitado.
+     */
+    private fun nextScheduledBlockLabel(): String? {
+        val now = java.util.Calendar.getInstance()
+        val nowMinutes = now.get(java.util.Calendar.HOUR_OF_DAY) * 60 + now.get(java.util.Calendar.MINUTE)
+
+        fun minutesUntilStart(schedule: GuardianPrefs.ScheduleWindow): Int? {
+            if (!schedule.enabled) return null
+            val parts = schedule.start.split(":")
+            val hour = parts.getOrNull(0)?.toIntOrNull() ?: return null
+            val minute = parts.getOrNull(1)?.toIntOrNull() ?: return null
+            val startMinutes = hour * 60 + minute
+            val diff = startMinutes - nowMinutes
+            return if (diff >= 0) diff else diff + 24 * 60 // já passou hoje — é amanhã
+        }
+
+        val bedtime = GuardianPrefs.bedtimeSchedule(this)
+        val study = GuardianPrefs.studySchedule(this)
+        val candidates = listOfNotNull(
+            minutesUntilStart(bedtime)?.let { it to ("🌙 Horário de Dormir" to bedtime.start) },
+            minutesUntilStart(study)?.let { it to ("📚 Horário de Estudo" to study.start) }
+        )
+        val (label, time) = candidates.minByOrNull { it.first }?.second ?: return null
+        return "$label às $time"
     }
 
     // ============================== TAREFAS DIÁRIAS ==============================
@@ -465,6 +831,24 @@ class LauncherHomeActivity : AppCompatActivity() {
         }
         taskAdapter.updateTasks(tasks)
         tasksSectionContainer.visibility = if (tasks.isEmpty()) View.GONE else View.VISIBLE
+        if (tasks.isEmpty()) return
+
+        val approvedCount = tasks.count { it.status == "approved" }
+        val allDone = approvedCount == tasks.size
+        // Âmbar enquanto falta pelo menos 1, verde quando tudo aprovado — mesmo par de
+        // cores já usado na barra de tempo (ver updateBatteryAndTime), pra manter a
+        // linguagem visual consistente entre os dois indicadores de "atenção" da Home.
+        val accentColor = if (allDone) 0xFF10B981.toInt() else 0xFFEAB308.toInt()
+        val borderColor = if (allDone) 0x6610B981.toInt() else 0x66EAB308.toInt()
+
+        tasksSectionTitle.text = if (allDone) "✅ Tarefas de hoje concluídas" else "⚠️ Tarefas de hoje ($approvedCount/${tasks.size})"
+        tasksSectionTitle.setTextColor(accentColor)
+
+        val cardBackground = GradientDrawable()
+        cardBackground.cornerRadius = 18.dp.toFloat()
+        cardBackground.setColor(0xB21C1917.toInt())
+        cardBackground.setStroke(2.dp, borderColor)
+        tasksSectionContainer.background = cardBackground
     }
 
     /** Toque num card de tarefa pendente/recusada: abre a câmera nativa direto (sem galeria). */
@@ -530,6 +914,7 @@ class LauncherHomeActivity : AppCompatActivity() {
             connection.connectTimeout = 8_000
             connection.readTimeout = 8_000
             connection.setRequestProperty("Content-Type", "application/json")
+            GuardianPrefs.deviceToken(this).let { if (!it.isNullOrBlank()) connection.setRequestProperty("X-Device-Token", it) }
             val body = JSONObject().put("photoBase64", base64Photo).toString()
             connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val ok = connection.responseCode == 200
@@ -681,6 +1066,56 @@ class LauncherHomeActivity : AppCompatActivity() {
             .setView(view)
             .create()
         dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+
+        // Preview em miniatura do vídeo já aplicado (player próprio do diálogo, separado
+        // do da Home — os dois nunca tocam ao mesmo tempo na prática, já que o diálogo só
+        // abre por cima da Home). Some sozinho quando o diálogo fecha (ver setOnDismissListener).
+        var dialogVideoPlayer: MediaPlayer? = null
+        val currentVideoUriForPreview = GuardianPrefs.videoWallpaperUri(this)
+        if (currentVideoUriForPreview != null) {
+            val previewContainer = view.findViewById<View>(R.id.videoPreviewContainer)
+            val previewThumb = view.findViewById<TextureView>(R.id.videoPreviewThumb)
+            previewContainer.visibility = View.VISIBLE
+            val startPreview = {
+                try {
+                    val surfaceTexture = previewThumb.surfaceTexture
+                    if (surfaceTexture != null) {
+                        val player = MediaPlayer()
+                        player.setSurface(Surface(surfaceTexture))
+                        player.setDataSource(this, Uri.parse(currentVideoUriForPreview))
+                        player.isLooping = true
+                        player.setVolume(0f, 0f)
+                        player.setOnPreparedListener { mp ->
+                            VideoTransform.apply(
+                                previewThumb, mp.videoWidth, mp.videoHeight,
+                                GuardianPrefs.videoCropScale(this), GuardianPrefs.videoCropPanX(this), GuardianPrefs.videoCropPanY(this)
+                            )
+                            mp.start()
+                        }
+                        player.prepareAsync()
+                        dialogVideoPlayer = player
+                    }
+                } catch (e: Exception) {
+                    previewContainer.visibility = View.GONE
+                }
+            }
+            if (previewThumb.isAvailable) {
+                startPreview()
+            } else {
+                previewThumb.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                    override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) = startPreview()
+                    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+                    override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
+                    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+                }
+            }
+        }
+        dialog.setOnDismissListener {
+            dialogVideoPlayer?.apply {
+                try { stop() } catch (e: Exception) { /* já parado, sem problema */ }
+                release()
+            }
+        }
 
         val columnsRow = view.findViewById<LinearLayout>(R.id.columnsRow)
         val currentColumns = GuardianPrefs.homeGridColumns(this)
