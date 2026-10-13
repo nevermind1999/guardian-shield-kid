@@ -24,6 +24,7 @@ import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.util.Log
 import android.widget.Toast
+import com.guardianshield.child.R
 import com.guardianshield.child.LauncherHomeActivity
 import com.guardianshield.child.util.AppRepository
 import com.guardianshield.child.util.GuardianPrefs
@@ -62,6 +63,10 @@ class ParentalAccessibilityService : AccessibilityService() {
         /** Espera entre tentativas quando a consulta falha (sem internet etc), crescente. */
         private const val RULE_SYNC_RETRY_MIN_MS = 5_000L
         private const val RULE_SYNC_RETRY_MAX_MS = 60_000L
+
+        private const val LOW_TIME_WARNING_MINUTES = 5
+        private const val LOW_TIME_CHANNEL_ID = "guardian_time_low"
+        private const val LOW_TIME_NOTIFICATION_ID = 5005
 
         /** O serviço ligado agora (null se a Acessibilidade estiver desligada). */
         @Volatile var instance: ParentalAccessibilityService? = null
@@ -313,17 +318,48 @@ class ParentalAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Aviso único por dia quando restam poucos minutos de tempo de tela — dá uma chance
-     * de a criança salvar o que estava fazendo antes do bloqueio por tempo esgotado pegar
-     * de surpresa. "Único por dia" pra não repetir a cada tick de 1min enquanto o uso
-     * segue na faixa de aviso (ver GuardianPrefs.hasShownLowTimeWarningToday).
+     * Notificação quando faltam 5 minutos (ou menos) pro celular bloquear por tempo — no
+     * limite do dia e de novo no fim de cada liberação do pai (ver
+     * GuardianPrefs.currentTimeWindowKey). Dá tempo de a criança salvar o que está fazendo.
      */
     private fun maybeWarnLowTimeRemaining() {
-        if (GuardianPrefs.isPauseAllActive(this) || GuardianPrefs.hasShownLowTimeWarningToday(this)) return
-        val remaining = GuardianPrefs.dailyLimitMinutes(this) - GuardianPrefs.usedMinutesToday(this)
-        if (remaining in 1..5) {
-            GuardianPrefs.markLowTimeWarningShownToday(this)
-            Toast.makeText(this, "⏳ Só restam $remaining minutos de tela hoje!", Toast.LENGTH_LONG).show()
+        val remaining = GuardianPrefs.minutesUntilTimeBlock(this) ?: return
+        if (remaining !in 1..LOW_TIME_WARNING_MINUTES) return
+        val windowKey = GuardianPrefs.currentTimeWindowKey(this)
+        if (GuardianPrefs.hasWarnedLowTime(this, windowKey)) return
+        GuardianPrefs.markLowTimeWarned(this, windowKey)
+        showLowTimeNotification(remaining)
+    }
+
+    private fun showLowTimeNotification(remaining: Int) {
+        val manager = getSystemService(android.app.NotificationManager::class.java) ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && manager.getNotificationChannel(LOW_TIME_CHANNEL_ID) == null) {
+            manager.createNotificationChannel(
+                android.app.NotificationChannel(LOW_TIME_CHANNEL_ID, "Tempo acabando", android.app.NotificationManager.IMPORTANCE_HIGH)
+                    .apply { description = "Aviso quando faltam poucos minutos de tela." }
+            )
+        }
+        val openHome = android.app.PendingIntent.getActivity(
+            this, 0, Intent(this, com.guardianshield.child.LauncherHomeActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        val text = if (remaining == 1) "Falta 1 minuto de tela. Salve o que está fazendo." else "Faltam $remaining minutos de tela. Salve o que está fazendo."
+        val notification = androidx.core.app.NotificationCompat.Builder(this, LOW_TIME_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher_foreground)
+            .setColor(0xFFFF6B00.toInt())
+            .setContentTitle("⏳ Seu tempo está acabando")
+            .setContentText(text)
+            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+            .setCategory(androidx.core.app.NotificationCompat.CATEGORY_REMINDER)
+            .setAutoCancel(true)
+            .setTimeoutAfter(remaining * 60_000L)
+            .setContentIntent(openHome)
+            .build()
+        try {
+            manager.notify(LOW_TIME_NOTIFICATION_ID, notification)
+        } catch (e: SecurityException) {
+            // Sem permissão de notificação: pelo menos o aviso rápido na tela.
+            Toast.makeText(this, "⏳ $text", Toast.LENGTH_LONG).show()
         }
     }
 

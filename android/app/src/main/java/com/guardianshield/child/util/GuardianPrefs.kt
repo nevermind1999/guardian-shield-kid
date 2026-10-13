@@ -148,18 +148,34 @@ object GuardianPrefs {
         of(context).edit().putInt(KEY_USED_MINUTES, 0).apply()
     }
 
-    // --- Aviso único por dia de "tempo quase acabando" (ver maybeWarnLowTimeRemaining em
-    // ParentalAccessibilityService) — mesmo padrão de reset diário do contador de uso acima. ---
-    private const val KEY_LOW_TIME_WARNING_DATE = "lowTimeWarningShownDate"
+    // --- Aviso de "tempo quase acabando" (ver maybeWarnLowTimeRemaining em
+    // ParentalAccessibilityService): uma vez por "trecho" de tempo — o limite do dia e cada
+    // liberação nova do pai contam separado, então o aviso volta a aparecer quando o tempo
+    // liberado também estiver acabando. ---
+    private const val KEY_LOW_TIME_WARNING_KEY = "lowTimeWarningShownDate"
 
-    fun hasShownLowTimeWarningToday(context: Context): Boolean {
-        val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
-        return of(context).getString(KEY_LOW_TIME_WARNING_DATE, null) == today
+    /** Minutos até o celular bloquear por tempo (null = nada vai bloquear por tempo agora,
+     * ex: Pausa Geral já ativa). Com liberação do pai ativa, o bloqueio só vem quando ela
+     * acaba E o limite do dia já foi usado — daí o maior dos dois. */
+    fun minutesUntilTimeBlock(context: Context): Int? {
+        if (isPauseAllActive(context)) return null
+        val dailyRemaining = (dailyLimitMinutes(context) - usedMinutesToday(context)).coerceAtLeast(0)
+        val grantRemaining = if (isParentTimeGrantActive(context)) parentTimeGrantRemainingMinutes(context) else 0
+        return maxOf(dailyRemaining, grantRemaining)
     }
 
-    fun markLowTimeWarningShownToday(context: Context) {
+    /** Identifica o "trecho" de tempo atual: dia + limite + liberação em andamento. */
+    fun currentTimeWindowKey(context: Context): String {
         val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
-        of(context).edit().putString(KEY_LOW_TIME_WARNING_DATE, today).apply()
+        val grant = if (isParentTimeGrantActive(context)) parentTimeGrantId(context) else 0L
+        return "$today|${dailyLimitMinutes(context)}|$grant"
+    }
+
+    fun hasWarnedLowTime(context: Context, windowKey: String): Boolean =
+        of(context).getString(KEY_LOW_TIME_WARNING_KEY, null) == windowKey
+
+    fun markLowTimeWarned(context: Context, windowKey: String) {
+        of(context).edit().putString(KEY_LOW_TIME_WARNING_KEY, windowKey).apply()
     }
 
     /** Zera o contador de uso quando a data mudou desde a última leitura/escrita. */
