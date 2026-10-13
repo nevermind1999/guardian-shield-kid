@@ -29,10 +29,13 @@ import android.view.MotionEvent
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
+import android.view.ViewGroup
+import android.view.Gravity
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.FrameLayout
 import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
@@ -50,7 +53,9 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.guardianshield.child.model.AppEntry
 import com.guardianshield.child.util.AppRepository
+import com.guardianshield.child.services.ParentalAccessibilityService
 import com.guardianshield.child.util.GuardianPrefs
+import com.guardianshield.child.util.HomeSnapshot
 import com.guardianshield.child.util.PermissionWatchdog
 import com.guardianshield.child.util.ServerConfig
 import com.guardianshield.child.util.VideoTransform
@@ -78,11 +83,12 @@ class LauncherHomeActivity : AppCompatActivity() {
 
     private lateinit var prefs: SharedPreferences
     private var apps: List<AppEntry> = emptyList()
-    private lateinit var homeAdapter: HomeGridAdapter
-    private lateinit var itemTouchHelper: ItemTouchHelper
-    // Posição que o item arrastado está sobrepondo forte o bastante pra virar pasta se
-    // solto agora — ver setupDragToReorder. Null = arrastar normal (só reordena).
-    private var pendingMergeTargetPosition: Int? = null
+    private lateinit var workspace: HomeWorkspace
+    // Ícones na grade, por chave ("app:<pacote>" / "folder:<id>") — reaproveitados entre
+    // redesenhos em vez de inflar tudo de novo.
+    private val iconViews = mutableMapOf<String, View>()
+    private var iconMenu: PopupMenu? = null
+    private var homeFullWarned = false
 
     private val Int.dp: Int
         get() = (this * resources.displayMetrics.density).toInt()
@@ -98,8 +104,6 @@ class LauncherHomeActivity : AppCompatActivity() {
     private lateinit var permissionWarningBanner: View
     private lateinit var permissionWarningText: TextView
     private lateinit var drawerHandle: View
-    private lateinit var homeGridRecyclerView: RecyclerView
-    private lateinit var emptyHomeHint: View
     private lateinit var videoWallpaper: TextureView
 
 
@@ -247,8 +251,7 @@ class LauncherHomeActivity : AppCompatActivity() {
         permissionWarningText = findViewById(R.id.permissionWarningText)
         setupPermissionWarningPulse()
         drawerHandle = findViewById(R.id.drawerHandle)
-        homeGridRecyclerView = findViewById(R.id.homeGridRecyclerView)
-        emptyHomeHint = findViewById(R.id.emptyHomeHint)
+        workspace = findViewById(R.id.homeWorkspace)
         videoWallpaper = findViewById(R.id.videoWallpaper)
         tasksSectionContainer = findViewById(R.id.tasksSectionContainer)
         tasksSectionTitle = findViewById(R.id.tasksSectionTitle)
@@ -288,16 +291,8 @@ class LauncherHomeActivity : AppCompatActivity() {
         // dispatchTouchEvent.
         swipeSlopPx = 40 * resources.displayMetrics.density
 
-        homeAdapter = HomeGridAdapter(
-            items = emptyList(),
-            appsByPackage = emptyMap(),
-            onLaunchApp = { app, icon -> AppRepository.launch(this, app.packageName, icon) },
-            onOpenFolder = { folder -> showFolderContents(folder) },
-            onLongPressApp = { app, holder -> showAppOptionsMenu(app, holder) },
-            onLongPressFolder = { folder, holder -> showFolderOptionsMenu(folder, holder) }
-        )
-        homeGridRecyclerView.adapter = homeAdapter
-        setupDragToReorder()
+        setupWorkspace()
+        HomeSnapshot.provider = { captureBlurredHome() }
 
         taskAdapter = TaskCardAdapter(onTap = { task -> launchTaskCamera(task.id) })
         tasksRecyclerView.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
@@ -357,10 +352,28 @@ class LauncherHomeActivity : AppCompatActivity() {
         // além de reagir na hora via packageChangeReceiver enquanto está em primeiro plano.
         refreshInstalledAppsAndGrid()
         resumeVideoWallpaper()
+        scheduleBackdropCapture()
+    }
+
+    private val backdropCaptureRunnable = Runnable {
+        if (hasWindowFocus() && !isFinishing) ParentalAccessibilityService.instance?.captureHomeBackdrop()
+    }
+
+    /** Pede um print novo da Home (fundo do popup de bloqueio) depois que ela assenta na tela. */
+    private fun scheduleBackdropCapture() {
+        clockHandler.removeCallbacks(backdropCaptureRunnable)
+        clockHandler.postDelayed(backdropCaptureRunnable, 900)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) scheduleBackdropCapture()
     }
 
     override fun onPause() {
         super.onPause()
+        workspace.stopWidgetEdit()
+        iconMenu?.dismiss()
         prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
         try {
             unregisterReceiver(batteryReceiver)
@@ -380,11 +393,13 @@ class LauncherHomeActivity : AppCompatActivity() {
 
     // A Home não fecha com o botão Voltar — igual a qualquer launcher de verdade
     override fun onBackPressed() {
-        // no-op
+        // Voltar só sai do modo de edição de widget; fora isso, nada.
+        workspace.stopWidgetEdit()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        HomeSnapshot.provider = null
         taskSubmitExecutor.shutdown()
         appLoader.shutdown()
     }
@@ -405,12 +420,11 @@ class LauncherHomeActivity : AppCompatActivity() {
     private var swipeStartY = 0f
     private var swipeTracking = false
     private var swipeConsumed = false
-    private var iconDragActive = false
 
     /**
      * Arrastar pra cima em qualquer ponto da Home abre a gaveta, como nos launchers do
-     * Android. Fica de fora: arrastar dentro da grade quando ela tem mais ícones do que cabe
-     * (aí o gesto rola a grade) e o arrasto de "Mover" um ícone. Quando o gesto vira
+     * Android. Fica de fora enquanto a grade está ocupada (toque e segure, ícone sendo
+     * arrastado, widget em edição — ver HomeWorkspace.isBusy). Quando o gesto vira
      * "abrir gaveta", os filhos recebem CANCEL — nada de toque fantasma num ícone.
      */
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
@@ -419,11 +433,11 @@ class LauncherHomeActivity : AppCompatActivity() {
                 swipeStartX = ev.rawX
                 swipeStartY = ev.rawY
                 swipeConsumed = false
-                swipeTracking = !iconDragActive && !startsOnScrollableGrid(ev)
+                swipeTracking = !workspace.isBusy
             }
             MotionEvent.ACTION_MOVE -> {
                 if (swipeConsumed) return true
-                if (swipeTracking && !iconDragActive) {
+                if (swipeTracking && !workspace.isBusy) {
                     val dy = ev.rawY - swipeStartY
                     val dx = ev.rawX - swipeStartX
                     if (dy < -swipeSlopPx && abs(dy) > abs(dx) * 1.5f) {
@@ -447,16 +461,6 @@ class LauncherHomeActivity : AppCompatActivity() {
             }
         }
         return super.dispatchTouchEvent(ev)
-    }
-
-    private fun startsOnScrollableGrid(ev: MotionEvent): Boolean {
-        val grid = homeGridRecyclerView
-        if (grid.visibility != View.VISIBLE) return false
-        if (!grid.canScrollVertically(1) && !grid.canScrollVertically(-1)) return false
-        val loc = IntArray(2)
-        grid.getLocationOnScreen(loc)
-        return ev.rawX >= loc[0] && ev.rawX <= loc[0] + grid.width &&
-            ev.rawY >= loc[1] && ev.rawY <= loc[1] + grid.height
     }
 
     /**
@@ -506,112 +510,6 @@ class LauncherHomeActivity : AppCompatActivity() {
         }
     }
 
-    // ============================== GRID DA HOME: mover / remover ==============================
-
-    /**
-     * Arrastar um ícone (chamado explicitamente via menu "Mover") reordena a grade ao
-     * vivo — e, se soltar bem em cima de outro ícone (>50% de sobreposição), os dois se
-     * juntam numa pasta nova em vez de só trocar de lugar. Enquanto a sobreposição não é
-     * forte o bastante pra virar pasta, o comportamento é o de sempre (empurra os outros
-     * ícones, reordena). O destaque visual de "solte aqui pra criar pasta" é o próprio
-     * HomeGridAdapter.setHoverTarget (ícone alvo cresce um pouco).
-     */
-    private fun setupDragToReorder() {
-        val callback = object : ItemTouchHelper.SimpleCallback(
-            ItemTouchHelper.UP or ItemTouchHelper.DOWN or ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT, 0
-        ) {
-            // Desligado: o arrastar só começa quando o usuário escolhe "Mover" no menu do
-            // toque e segure (showAppOptionsMenu/showFolderOptionsMenu), não
-            // automaticamente em qualquer toque longo.
-            override fun isLongPressDragEnabled() = false
-
-            override fun onMove(
-                recyclerView: RecyclerView,
-                viewHolder: RecyclerView.ViewHolder,
-                target: RecyclerView.ViewHolder
-            ): Boolean {
-                val draggedPos = viewHolder.bindingAdapterPosition
-                val targetPos = target.bindingAdapterPosition
-                if (draggedPos == RecyclerView.NO_POSITION || targetPos == RecyclerView.NO_POSITION) return false
-
-                val draggedItem = homeAdapter.itemAt(draggedPos)
-                val targetItem = homeAdapter.itemAt(targetPos)
-                val canMerge = !(draggedItem is GuardianPrefs.HomeItem.FolderItem && targetItem is GuardianPrefs.HomeItem.FolderItem)
-
-                if (canMerge && overlapFraction(viewHolder.itemView, target.itemView) > MERGE_OVERLAP_THRESHOLD) {
-                    pendingMergeTargetPosition = targetPos
-                    homeAdapter.setHoverTarget(targetPos)
-                    return false // segura o arrasto pairando ali, sem empurrar a grade
-                }
-                pendingMergeTargetPosition = null
-                homeAdapter.setHoverTarget(null)
-                homeAdapter.moveItem(draggedPos, targetPos)
-                return true
-            }
-
-            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
-                // Não usamos swipe-para-remover — só arrastar pra reordenar/juntar.
-            }
-
-            override fun onSelectedChanged(viewHolder: RecyclerView.ViewHolder?, actionState: Int) {
-                super.onSelectedChanged(viewHolder, actionState)
-                if (actionState == ItemTouchHelper.ACTION_STATE_DRAG) iconDragActive = true
-            }
-
-            override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
-                super.clearView(recyclerView, viewHolder)
-                iconDragActive = false
-                val mergeTarget = pendingMergeTargetPosition
-                pendingMergeTargetPosition = null
-                homeAdapter.setHoverTarget(null)
-                val draggedPos = viewHolder.bindingAdapterPosition
-                if (mergeTarget != null && draggedPos != RecyclerView.NO_POSITION && draggedPos != mergeTarget) {
-                    homeAdapter.mergeIntoFolder(draggedPos, mergeTarget)
-                    Toast.makeText(this@LauncherHomeActivity, "📁 Pasta criada", Toast.LENGTH_SHORT).show()
-                }
-                GuardianPrefs.setHomeLayout(this@LauncherHomeActivity, homeAdapter.currentItems())
-            }
-        }
-        itemTouchHelper = ItemTouchHelper(callback)
-        itemTouchHelper.attachToRecyclerView(homeGridRecyclerView)
-    }
-
-    /** Fração da área de [target] coberta por [dragged] agora — usa x/y (não left/top),
-     * que já refletem a translação visual do arrastar do ItemTouchHelper. */
-    private fun overlapFraction(dragged: View, target: View): Float {
-        val left = maxOf(dragged.x, target.x)
-        val top = maxOf(dragged.y, target.y)
-        val right = minOf(dragged.x + dragged.width, target.x + target.width)
-        val bottom = minOf(dragged.y + dragged.height, target.y + target.height)
-        val intersection = (right - left).coerceAtLeast(0f) * (bottom - top).coerceAtLeast(0f)
-        val targetArea = target.width * target.height
-        return if (targetArea == 0) 0f else intersection / targetArea
-    }
-
-    companion object {
-        private const val MERGE_OVERLAP_THRESHOLD = 0.5f
-    }
-
-    /** Toque e segure num app da Home: mostra as opções em vez de simplesmente sumir com ele. */
-    private fun showAppOptionsMenu(app: AppEntry, holder: RecyclerView.ViewHolder) {
-        val popup = PopupMenu(this, holder.itemView)
-        popup.menu.add(0, 1, 0, "Mover")
-        popup.menu.add(0, 2, 1, "Remover da tela inicial")
-        popup.menu.add(0, 3, 2, "Desinstalar")
-        popup.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                1 -> itemTouchHelper.startDrag(holder)
-                2 -> {
-                    GuardianPrefs.unpin(this, app.packageName)
-                    refreshHomeGrid()
-                }
-                3 -> uninstallApp(app)
-            }
-            true
-        }
-        popup.show()
-    }
-
     /**
      * Abre o diálogo padrão do sistema pra desinstalar — mesmo comportamento de qualquer
      * launcher (Nova, Pixel Launcher, etc). Não desinstala silenciosamente: o sistema
@@ -627,23 +525,389 @@ class LauncherHomeActivity : AppCompatActivity() {
         }
     }
 
-    /** Toque e segure numa pasta da Home: mover (arrastar) ou desfazer, sem precisar
-     * abrir a pasta primeiro — espelha showAppOptionsMenu acima. */
-    private fun showFolderOptionsMenu(folder: GuardianPrefs.HomeItem.FolderItem, holder: RecyclerView.ViewHolder) {
-        val popup = PopupMenu(this, holder.itemView)
-        popup.menu.add(0, 1, 0, "Mover")
-        popup.menu.add(0, 2, 1, "Desfazer pasta")
-        popup.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                1 -> itemTouchHelper.startDrag(holder)
-                2 -> {
-                    homeAdapter.dissolveFolder(folder.id)
-                    GuardianPrefs.setHomeLayout(this, homeAdapter.currentItems())
+    /**
+     * A Home desenhada pequena (1/8) e desfocada — fundo do popup da tela de bloqueio (ver
+     * HomeSnapshot). Papel de parede: o vídeo, se tiver; senão o do sistema (se o Android
+     * deixar ler) ou um degradê escuro. Por cima, os ícones e widgets.
+     */
+    private fun captureBlurredHome(): Bitmap? {
+        val root = findViewById<View>(R.id.contentColumn) ?: return null
+        val w = window.decorView.width
+        val h = window.decorView.height
+        if (w <= 0 || h <= 0) return null
+        val scale = 1f / 8f
+        val small = Bitmap.createBitmap((w * scale).toInt().coerceAtLeast(1), (h * scale).toInt().coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(small)
+        canvas.drawColor(0xFF1C1917.toInt())
+        canvas.save()
+        canvas.scale(scale, scale)
+        val video = if (videoWallpaper.visibility == View.VISIBLE && videoWallpaper.isAvailable) videoWallpaper.getBitmap(w / 4, h / 4) else null
+        if (video != null) {
+            canvas.drawBitmap(video, null, android.graphics.Rect(0, 0, w, h), android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
+        } else {
+            try {
+                android.app.WallpaperManager.getInstance(this).drawable?.let { d ->
+                    // centerCrop
+                    val dw = d.intrinsicWidth.coerceAtLeast(1)
+                    val dh = d.intrinsicHeight.coerceAtLeast(1)
+                    val f = maxOf(w.toFloat() / dw, h.toFloat() / dh)
+                    val sw = (dw * f).toInt()
+                    val sh = (dh * f).toInt()
+                    d.setBounds((w - sw) / 2, (h - sh) / 2, (w - sw) / 2 + sw, (h - sh) / 2 + sh)
+                    d.draw(canvas)
+                }
+            } catch (e: Exception) {
+                // O Android não deixa ler o papel de parede do sistema (Android 14+). Um
+                // papel de parede bem desfocado é praticamente um degradê das cores dele —
+                // e essas cores o Android libera.
+                drawWallpaperColors(canvas, w, h)
+            }
+        }
+        try {
+            root.draw(canvas)
+        } catch (e: Exception) {
+            // Algum ícone com bitmap de hardware não desenha em canvas comum — fica só o fundo.
+        }
+        canvas.restore()
+        return HomeSnapshot.boxBlur(small, 2, 2)
+    }
+
+    private fun drawWallpaperColors(canvas: android.graphics.Canvas, w: Int, h: Int) {
+        val colors = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            android.app.WallpaperManager.getInstance(this).getWallpaperColors(android.app.WallpaperManager.FLAG_SYSTEM)
+        } else null
+        val primary = colors?.primaryColor?.toArgb() ?: return
+        val secondary = colors.secondaryColor?.toArgb() ?: primary
+        val tertiary = colors.tertiaryColor?.toArgb() ?: secondary
+        val paint = android.graphics.Paint()
+        paint.shader = android.graphics.LinearGradient(0f, 0f, w * 0.3f, h.toFloat(), intArrayOf(primary, secondary, tertiary), null, android.graphics.Shader.TileMode.CLAMP)
+        canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
+    }
+
+    // ============================== GRADE DA HOME (células) ==============================
+
+    private val widgetViews = mutableMapOf<String, View>()
+
+    companion object {
+        private const val WIDGET_CLOCK = "widget:clock"
+        private const val WIDGET_STATUS = "widget:status"
+        private const val WIDGET_TASKS = "widget:tasks"
+    }
+
+    /** Move relógio, status e tarefas pra dentro da grade (cada um num quadro com respiro)
+     * e liga os gestos de toque e segure. */
+    private fun setupWorkspace() {
+        workspace.columns = GuardianPrefs.homeGridColumns(this)
+        listOf(
+            WIDGET_CLOCK to findViewById<View>(R.id.clockContainer),
+            WIDGET_STATUS to findViewById<View>(R.id.statusPill),
+            WIDGET_TASKS to tasksSectionContainer
+        ).forEach { (key, view) ->
+            (view.parent as ViewGroup).removeView(view)
+            val frame = FrameLayout(this)
+            val pad = 6.dp
+            frame.setPadding(pad, pad, pad, pad)
+            (view.layoutParams as? ViewGroup.MarginLayoutParams)?.setMargins(0, 0, 0, 0)
+            val gravity = if (key == WIDGET_TASKS) Gravity.TOP else Gravity.CENTER_VERTICAL
+            val height = if (key == WIDGET_TASKS) FrameLayout.LayoutParams.MATCH_PARENT else FrameLayout.LayoutParams.WRAP_CONTENT
+            frame.addView(view, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, height, gravity))
+            val (minW, minH) = widgetMinSpan(key)
+            workspace.addView(frame, HomeWorkspace.LayoutParams(defaultWidgetCell(key), key, isWidget = true, minW = minW, minH = minH))
+            widgetViews[key] = frame
+        }
+        // Relógio acompanha o tamanho do widget (maior quando ele cresce, sem cortar quando encolhe).
+        widgetViews[WIDGET_CLOCK]?.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+            val hDp = v.height / resources.displayMetrics.density
+            val wDp = v.width / resources.displayMetrics.density
+            val size = minOf((hDp - 34f) * 0.72f, wDp * 0.22f).coerceIn(26f, 80f)
+            if (kotlin.math.abs(clockText.textSize / resources.displayMetrics.scaledDensity - size) > 0.5f) {
+                clockText.post { clockText.textSize = size }
+            }
+            val showDate = hDp >= 70f
+            if ((dateText.visibility == View.VISIBLE) != showDate) dateText.post { dateText.visibility = if (showDate) View.VISIBLE else View.GONE }
+        }
+
+        workspace.listener = object : HomeWorkspace.Listener {
+            override fun onIconLongPress(view: View, key: String) = showIconMenu(view, key)
+            override fun onIconDragStarted(key: String) {
+                iconMenu?.dismiss()
+                iconMenu = null
+            }
+            override fun onIconDropped(key: String, cellX: Int, cellY: Int, targetKey: String?): Boolean =
+                dropIcon(key, cellX, cellY, targetKey)
+            override fun onWidgetEditStarted(key: String) {
+                Toast.makeText(this@LauncherHomeActivity, "Arraste pra mover, puxe as bolinhas pra mudar o tamanho. Toque fora pra terminar.", Toast.LENGTH_SHORT).show()
+            }
+            override fun onWidgetChanged(key: String, cell: HomeWorkspace.Cell) {
+                val positions = GuardianPrefs.homePositions(this@LauncherHomeActivity).toMutableMap()
+                positions[key] = intArrayOf(cell.x, cell.y, cell.w, cell.h)
+                GuardianPrefs.setHomePositions(this@LauncherHomeActivity, positions)
+                // Ícones que ficaram embaixo do widget vão pra célula livre mais próxima.
+                if (apps.isNotEmpty()) renderWorkspace(apps.associateBy { it.packageName }, persist = true)
+            }
+            override fun onEmptyLongPress() = showCustomizeDialog()
+            override fun onLayoutGridChanged(columns: Int, rows: Int) {
+                if (apps.isNotEmpty()) renderWorkspace(apps.associateBy { it.packageName }, persist = true)
+            }
+        }
+    }
+
+    private fun widgetMinSpan(key: String): Pair<Int, Int> = when (key) {
+        WIDGET_STATUS -> minOf(3, workspace.columns) to 1
+        WIDGET_TASKS -> 2 to 2
+        else -> 2 to 1
+    }
+
+    private fun defaultWidgetCell(key: String): HomeWorkspace.Cell {
+        val cols = workspace.columns
+        return when (key) {
+            WIDGET_CLOCK -> HomeWorkspace.Cell(0, 0, cols, 2)
+            WIDGET_STATUS -> HomeWorkspace.Cell(0, 2, cols, 1)
+            // 3 linhas cabem o título e os cards inteiros; em tela baixa, 2.
+            else -> HomeWorkspace.Cell(0, 3, cols, if (workspace.rows >= 8) 3 else 2)
+        }
+    }
+
+    private fun keyFor(item: GuardianPrefs.HomeItem): String = when (item) {
+        is GuardianPrefs.HomeItem.AppItem -> "app:" + item.packageName
+        is GuardianPrefs.HomeItem.FolderItem -> "folder:" + item.id
+    }
+
+    /**
+     * Encaixa tudo nas células: widgets primeiro (posição salva, ou a padrão), depois os
+     * ícones na posição salva — ou na 1ª célula livre se não tiver uma (recém-fixado) ou se
+     * a salva estiver ocupada/fora da grade (ex: menos colunas agora). [persist] grava as
+     * posições novas; false na 1ª pintura rápida, com a lista de apps ainda parcial.
+     */
+    private fun renderWorkspace(appsByPackage: Map<String, AppEntry>, persist: Boolean) {
+        val cols = workspace.columns
+        val rows = workspace.rows
+        if (rows == 0) return // ainda não mediu; onLayoutGridChanged chama de novo
+        val saved = GuardianPrefs.homePositions(this)
+        val positions = saved.toMutableMap()
+        val occupied = mutableListOf<HomeWorkspace.Cell>()
+
+        fun clamp(c: HomeWorkspace.Cell, minW: Int, minH: Int): HomeWorkspace.Cell {
+            val w = c.w.coerceIn(minOf(minW, cols), cols)
+            val h = c.h.coerceIn(minOf(minH, rows), rows)
+            return HomeWorkspace.Cell(c.x.coerceIn(0, cols - w), c.y.coerceIn(0, rows - h), w, h)
+        }
+
+        for ((key, view) in widgetViews) {
+            val lp = view.layoutParams as HomeWorkspace.LayoutParams
+            val (minW, minH) = widgetMinSpan(key)
+            var cell = clamp(saved[key]?.let { HomeWorkspace.Cell(it[0], it[1], it[2], it[3]) } ?: defaultWidgetCell(key), minW, minH)
+            if (occupied.any { it.overlaps(cell) }) cell = clamp(defaultWidgetCell(key), minW, minH)
+            lp.cell = cell
+            occupied.add(cell)
+            positions[key] = intArrayOf(cell.x, cell.y, cell.w, cell.h)
+        }
+
+        val blocked = GuardianPrefs.blockedPackages(this)
+        val paused = GuardianPrefs.isPauseAllActive(this)
+        val alwaysAvailable = GuardianPrefs.alwaysAvailablePackages(this)
+        val items = GuardianPrefs.homeLayout(this)
+        val liveKeys = mutableSetOf<String>()
+        var skipped = 0
+
+        for (item in items) {
+            val key = keyFor(item)
+            val view = when (item) {
+                is GuardianPrefs.HomeItem.AppItem -> {
+                    val app = appsByPackage[item.packageName] ?: continue
+                    bindAppIcon(key, app, (paused || app.packageName in blocked) && app.packageName !in alwaysAvailable, app.packageName in alwaysAvailable)
+                }
+                is GuardianPrefs.HomeItem.FolderItem -> {
+                    val folderApps = item.packages.mapNotNull { appsByPackage[it] }
+                    if (folderApps.isEmpty()) continue
+                    bindFolderIcon(key, item, folderApps)
                 }
             }
-            true
+            var cell = saved[key]?.let { HomeWorkspace.Cell(it[0], it[1], 1, 1) }
+            if (cell == null || cell.x >= cols || cell.y >= rows || occupied.any { it.overlaps(cell!!) }) {
+                val free = workspace.firstFreeCell(occupied)
+                if (free == null) {
+                    skipped++
+                    view.visibility = View.GONE
+                    liveKeys.add(key)
+                    continue
+                }
+                cell = HomeWorkspace.Cell(free.first, free.second, 1, 1)
+            }
+            view.visibility = View.VISIBLE
+            (view.layoutParams as HomeWorkspace.LayoutParams).cell = cell
+            occupied.add(cell)
+            positions[key] = intArrayOf(cell.x, cell.y, 1, 1)
+            liveKeys.add(key)
         }
+
+        // Ícones que saíram da Home (desafixados, pasta desfeita, app desinstalado).
+        (iconViews.keys - liveKeys).forEach { key ->
+            iconViews.remove(key)?.let { workspace.removeView(it) }
+            if (persist) positions.remove(key)
+        }
+        workspace.requestLayout()
+
+        if (persist && positions.keys.any { k -> !saved.containsKey(k) || !saved[k]!!.contentEquals(positions[k]) } || persist && positions.size != saved.size) {
+            GuardianPrefs.setHomePositions(this, positions)
+        }
+        if (persist && skipped > 0 && !homeFullWarned) {
+            homeFullWarned = true
+            Toast.makeText(this, "A tela inicial está cheia: $skipped app(s) ficaram só na gaveta.", Toast.LENGTH_LONG).show()
+        }
+        if (skipped == 0) homeFullWarned = false
+        if (persist) scheduleBackdropCapture()
+    }
+
+    private fun bindAppIcon(key: String, app: AppEntry, blocked: Boolean, alwaysAvailable: Boolean): View {
+        val view = iconViews.getOrPut(key) {
+            layoutInflater.inflate(R.layout.item_app_icon, workspace, false).also {
+                it.tag = HomeGridAdapter.AppViewHolder(it)
+                workspace.addView(it, HomeWorkspace.LayoutParams(HomeWorkspace.Cell(0, 0, 1, 1), key, isWidget = false))
+            }
+        }
+        (view.tag as HomeGridAdapter.AppViewHolder).bind(
+            app, blocked, alwaysAvailable, false,
+            { entry, icon -> AppRepository.launch(this, entry.packageName, icon) }, { _, _ -> }
+        )
+        disableChildLongPress(view, R.id.iconFrame)
+        return view
+    }
+
+    private fun bindFolderIcon(key: String, folder: GuardianPrefs.HomeItem.FolderItem, folderApps: List<AppEntry>): View {
+        val view = iconViews.getOrPut(key) {
+            layoutInflater.inflate(R.layout.item_folder_icon, workspace, false).also {
+                it.tag = HomeGridAdapter.FolderViewHolder(it)
+                workspace.addView(it, HomeWorkspace.LayoutParams(HomeWorkspace.Cell(0, 0, 1, 1), key, isWidget = false))
+            }
+        }
+        (view.tag as HomeGridAdapter.FolderViewHolder).bind(folder, folderApps, false, { showFolderContents(it) }, { })
+        disableChildLongPress(view, R.id.folderFrame)
+        return view
+    }
+
+    /** Toque e segure é tratado pela grade (HomeWorkspace), não pelo ícone. */
+    private fun disableChildLongPress(view: View, frameId: Int) {
+        view.setOnLongClickListener(null)
+        view.isLongClickable = false
+        view.findViewById<View>(frameId)?.let {
+            it.setOnLongClickListener(null)
+            it.isLongClickable = false
+        }
+    }
+
+    /** Menu do toque e segure num ícone da Home. Se o dedo andar, o menu fecha e o ícone
+     * passa a ser arrastado (ver HomeWorkspace). */
+    private fun showIconMenu(view: View, key: String) {
+        iconMenu?.dismiss()
+        val popup = PopupMenu(this, view)
+        if (key.startsWith("app:")) {
+            val pkg = key.removePrefix("app:")
+            val app = apps.firstOrNull { it.packageName == pkg }
+            popup.menu.add(0, 1, 0, "Remover da tela inicial")
+            if (app != null) popup.menu.add(0, 2, 1, "Desinstalar")
+            popup.setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    1 -> {
+                        GuardianPrefs.unpin(this, pkg)
+                        refreshHomeGrid()
+                    }
+                    2 -> app?.let { uninstallApp(it) }
+                }
+                true
+            }
+        } else {
+            val folderId = key.removePrefix("folder:")
+            val folder = GuardianPrefs.homeLayout(this).filterIsInstance<GuardianPrefs.HomeItem.FolderItem>().find { it.id == folderId }
+            popup.menu.add(0, 1, 0, "Abrir")
+            popup.menu.add(0, 2, 1, "Desfazer pasta")
+            popup.setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    1 -> folder?.let { showFolderContents(it) }
+                    2 -> dissolveFolder(folderId)
+                }
+                true
+            }
+        }
+        popup.setOnDismissListener { if (iconMenu === popup) iconMenu = null }
+        iconMenu = popup
         popup.show()
+    }
+
+    /** Soltou um ícone arrastado: célula vazia = só muda de lugar; em cima de outro ícone =
+     * vira pasta (app+app) ou entra na pasta (app+pasta). Pasta em cima de pasta não junta. */
+    private fun dropIcon(key: String, cellX: Int, cellY: Int, targetKey: String?): Boolean {
+        val positions = GuardianPrefs.homePositions(this).toMutableMap()
+        if (targetKey == null) {
+            positions[key] = intArrayOf(cellX, cellY, 1, 1)
+            GuardianPrefs.setHomePositions(this, positions)
+            renderWorkspace(apps.associateBy { it.packageName }, persist = true)
+            return true
+        }
+        val items = GuardianPrefs.homeLayout(this).toMutableList()
+        val dragged = items.firstOrNull { keyFor(it) == key } ?: return false
+        val target = items.firstOrNull { keyFor(it) == targetKey } ?: return false
+        val merged: GuardianPrefs.HomeItem.FolderItem = when {
+            target is GuardianPrefs.HomeItem.FolderItem && dragged is GuardianPrefs.HomeItem.AppItem ->
+                target.copy(packages = target.packages + dragged.packageName)
+            dragged is GuardianPrefs.HomeItem.FolderItem && target is GuardianPrefs.HomeItem.AppItem ->
+                dragged.copy(packages = dragged.packages + target.packageName)
+            dragged is GuardianPrefs.HomeItem.AppItem && target is GuardianPrefs.HomeItem.AppItem ->
+                GuardianPrefs.HomeItem.FolderItem("folder-" + System.currentTimeMillis(), "Pasta", listOf(target.packageName, dragged.packageName))
+            else -> return false
+        }
+        val targetIndex = items.indexOf(target)
+        items.remove(dragged)
+        items.remove(target)
+        items.add(targetIndex.coerceAtMost(items.size), merged)
+        positions.remove(key)
+        positions.remove(targetKey)
+        positions[keyFor(merged)] = intArrayOf(cellX, cellY, 1, 1)
+        GuardianPrefs.setHomeLayout(this, items)
+        GuardianPrefs.setHomePositions(this, positions)
+        renderWorkspace(apps.associateBy { it.packageName }, persist = true)
+        if (dragged is GuardianPrefs.HomeItem.AppItem && target is GuardianPrefs.HomeItem.AppItem) {
+            Toast.makeText(this, "📁 Pasta criada", Toast.LENGTH_SHORT).show()
+        }
+        return true
+    }
+
+    /** Renomeia ou troca os apps de uma pasta; com 1 app ou menos, a pasta se desfaz e o
+     * app que sobrou fica no lugar dela. */
+    private fun replaceFolder(folderId: String, newName: String? = null, newPackages: List<String>? = null) {
+        val items = GuardianPrefs.homeLayout(this).toMutableList()
+        val index = items.indexOfFirst { it is GuardianPrefs.HomeItem.FolderItem && it.id == folderId }
+        if (index == -1) return
+        val current = items[index] as GuardianPrefs.HomeItem.FolderItem
+        val packages = newPackages ?: current.packages
+        val positions = GuardianPrefs.homePositions(this).toMutableMap()
+        val folderPos = positions["folder:$folderId"]
+        when {
+            packages.isEmpty() -> items.removeAt(index)
+            packages.size == 1 -> {
+                items[index] = GuardianPrefs.HomeItem.AppItem(packages.first())
+                positions.remove("folder:$folderId")
+                if (folderPos != null) positions["app:" + packages.first()] = folderPos
+            }
+            else -> items[index] = current.copy(name = newName ?: current.name, packages = packages)
+        }
+        GuardianPrefs.setHomeLayout(this, items)
+        GuardianPrefs.setHomePositions(this, positions)
+        refreshHomeGrid()
+    }
+
+    /** Solta todos os apps da pasta: o 1º fica no lugar dela, os outros nas células livres. */
+    private fun dissolveFolder(folderId: String) {
+        val items = GuardianPrefs.homeLayout(this).toMutableList()
+        val index = items.indexOfFirst { it is GuardianPrefs.HomeItem.FolderItem && it.id == folderId }
+        if (index == -1) return
+        val folder = items.removeAt(index) as GuardianPrefs.HomeItem.FolderItem
+        folder.packages.forEachIndexed { i, pkg -> items.add(index + i, GuardianPrefs.HomeItem.AppItem(pkg)) }
+        val positions = GuardianPrefs.homePositions(this).toMutableMap()
+        positions.remove("folder:$folderId")?.let { pos -> folder.packages.firstOrNull()?.let { positions["app:$it"] = pos } }
+        GuardianPrefs.setHomeLayout(this, items)
+        GuardianPrefs.setHomePositions(this, positions)
+        refreshHomeGrid()
     }
 
     /**
@@ -664,7 +928,7 @@ class LauncherHomeActivity : AppCompatActivity() {
         // recebida no toque) — assim remover um app de dentro e continuar no diálogo
         // reflete o estado real sem precisar fechar e reabrir.
         fun currentFolder(): GuardianPrefs.HomeItem.FolderItem? =
-            homeAdapter.currentItems().filterIsInstance<GuardianPrefs.HomeItem.FolderItem>().find { it.id == folder.id }
+            GuardianPrefs.homeLayout(this).filterIsInstance<GuardianPrefs.HomeItem.FolderItem>().find { it.id == folder.id }
 
         val appsByPackage = apps.associateBy { it.packageName }
         val contentsAdapter = AppGridAdapter(
@@ -678,8 +942,7 @@ class LauncherHomeActivity : AppCompatActivity() {
                     when (item.itemId) {
                         1 -> {
                             val remaining = currentFolder()?.packages?.filterNot { it == app.packageName } ?: emptyList()
-                            homeAdapter.replaceFolder(folder.id, newPackages = remaining)
-                            GuardianPrefs.setHomeLayout(this, homeAdapter.currentItems())
+                            replaceFolder(folder.id, newPackages = remaining)
                             if (remaining.size <= 1) {
                                 dialog.dismiss() // a pasta se desfez sozinha (0 ou 1 app não é mais pasta)
                             } else {
@@ -707,8 +970,7 @@ class LauncherHomeActivity : AppCompatActivity() {
                 .setPositiveButton("Salvar") { _, _ ->
                     val newName = input.text.toString().trim()
                     if (newName.isNotEmpty()) {
-                        homeAdapter.replaceFolder(folder.id, newName = newName)
-                        GuardianPrefs.setHomeLayout(this, homeAdapter.currentItems())
+                        replaceFolder(folder.id, newName = newName)
                         titleText.text = newName
                     }
                 }
@@ -717,8 +979,7 @@ class LauncherHomeActivity : AppCompatActivity() {
         }
 
         view.findViewById<TextView>(R.id.folderDissolveButton).setOnClickListener {
-            homeAdapter.dissolveFolder(folder.id)
-            GuardianPrefs.setHomeLayout(this, homeAdapter.currentItems())
+            dissolveFolder(folder.id)
             dialog.dismiss()
         }
 
@@ -811,11 +1072,7 @@ class LauncherHomeActivity : AppCompatActivity() {
     /** Desenha a grade com só os apps da Home, sem mexer nos fixados (a lista parcial não
      * pode ser usada pra "limpar" apps que não estão nela). */
     private fun showHomeAppsEarly(homeApps: List<AppEntry>) {
-        val items = GuardianPrefs.homeLayout(this)
-        homeAdapter.updateItems(items, homeApps.associateBy { it.packageName })
-        homeAdapter.updateBlockedState(GuardianPrefs.blockedPackages(this), GuardianPrefs.isPauseAllActive(this), GuardianPrefs.alwaysAvailablePackages(this))
-        homeGridRecyclerView.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
-        emptyHomeHint.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
+        renderWorkspace(homeApps.associateBy { it.packageName }, persist = false)
     }
 
     private fun applyInstalledApps(loaded: List<AppEntry>) {
@@ -844,16 +1101,10 @@ class LauncherHomeActivity : AppCompatActivity() {
             refreshPermissionWarning()
             return
         }
-        val items = GuardianPrefs.homeLayout(this)
-        val appsByPackage = apps.associateBy { it.packageName }
-        homeAdapter.updateItems(items, appsByPackage)
-        homeAdapter.updateBlockedState(GuardianPrefs.blockedPackages(this), GuardianPrefs.isPauseAllActive(this), GuardianPrefs.alwaysAvailablePackages(this))
-
-        val isEmpty = items.isEmpty()
-        homeGridRecyclerView.visibility = if (isEmpty) View.GONE else View.VISIBLE
-        emptyHomeHint.visibility = if (isEmpty) View.VISIBLE else View.GONE
-
+        // Refaz a tarefa antes da grade: o widget de tarefas pode ter mudado de conteúdo.
         refreshTasksWidget()
+        renderWorkspace(apps.associateBy { it.packageName }, persist = true)
+
         refreshScheduleHint()
         refreshPermissionWarning()
     }
@@ -967,8 +1218,19 @@ class LauncherHomeActivity : AppCompatActivity() {
             }
         }
         taskAdapter.updateTasks(tasks)
-        tasksSectionContainer.visibility = if (tasks.isEmpty()) View.GONE else View.VISIBLE
-        if (tasks.isEmpty()) return
+        // O widget fica sempre na grade (a criança escolheu onde e o tamanho dele); sem
+        // tarefa hoje, mostra só um aviso curto em vez de sumir e deixar um buraco.
+        tasksSectionContainer.visibility = View.VISIBLE
+        tasksRecyclerView.visibility = if (tasks.isEmpty()) View.GONE else View.VISIBLE
+        if (tasks.isEmpty()) {
+            tasksSectionTitle.text = "✨ Nenhuma tarefa hoje"
+            tasksSectionTitle.setTextColor(0xCCFFFFFF.toInt())
+            tasksSectionContainer.background = GradientDrawable().apply {
+                cornerRadius = 18.dp.toFloat()
+                setColor(0x991C1917.toInt())
+            }
+            return
+        }
 
         val approvedCount = tasks.count { it.status == "approved" }
         val allDone = approvedCount == tasks.size
@@ -1072,7 +1334,8 @@ class LauncherHomeActivity : AppCompatActivity() {
     }
 
     private fun applyGridColumns() {
-        homeGridRecyclerView.layoutManager = GridLayoutManager(this, GuardianPrefs.homeGridColumns(this))
+        workspace.columns = GuardianPrefs.homeGridColumns(this)
+        if (apps.isNotEmpty()) renderWorkspace(apps.associateBy { it.packageName }, persist = true)
     }
 
     private fun applyThemeColors() {

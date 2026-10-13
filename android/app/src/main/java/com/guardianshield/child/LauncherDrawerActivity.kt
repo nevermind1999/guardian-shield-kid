@@ -126,11 +126,7 @@ class LauncherDrawerActivity : AppCompatActivity() {
             // o usuário escolheu arrastando, então lá isso ficaria estranho.
             sortBlockedLast = true,
             onLaunch = { app -> AppRepository.launch(this, app.packageName) },
-            onLongPress = { app, _ ->
-                val nowPinned = GuardianPrefs.togglePinned(this, app.packageName)
-                val message = if (nowPinned) "${app.label} fixado na tela inicial" else "${app.label} removido da tela inicial"
-                Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
-            }
+            onLongPress = { app, holder -> showAppMenu(app, holder.itemView) }
         )
         recyclerView.adapter = adapter
 
@@ -281,5 +277,29 @@ class LauncherDrawerActivity : AppCompatActivity() {
         gradient.setGradientCenter(0.5f, 0f)
         gradient.colors = intArrayOf(tinted, 0xFF0B132B.toInt())
         root.background = gradient
+    }
+
+    /** Toque e segure num app da gaveta: menu, como nos launchers do Android (antes fixava
+     * ou desafixava direto, sem perguntar). */
+    private fun showAppMenu(app: AppEntry, anchor: View) {
+        val popup = android.widget.PopupMenu(this, anchor)
+        val pinned = app.packageName in GuardianPrefs.pinnedHomeApps(this)
+        popup.menu.add(0, 1, 0, if (pinned) "Remover da tela inicial" else "Adicionar à tela inicial")
+        popup.menu.add(0, 2, 1, "Desinstalar")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                1 -> {
+                    if (pinned) GuardianPrefs.unpin(this, app.packageName) else GuardianPrefs.togglePinned(this, app.packageName)
+                    Toast.makeText(this, if (pinned) "${app.label} saiu da tela inicial" else "${app.label} foi pra tela inicial", Toast.LENGTH_SHORT).show()
+                }
+                2 -> try {
+                    startActivity(Intent(Intent.ACTION_DELETE, android.net.Uri.parse("package:${app.packageName}")))
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Não foi possível abrir a desinstalação de ${app.label}.", Toast.LENGTH_SHORT).show()
+                }
+            }
+            true
+        }
+        popup.show()
     }
 }

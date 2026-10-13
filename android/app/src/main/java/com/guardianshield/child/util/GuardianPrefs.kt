@@ -656,6 +656,31 @@ object GuardianPrefs {
         return list
     }
 
+    // --- Posição de cada coisa na grade da Home (células), por chave: "app:<pacote>",
+    // "folder:<id>", "widget:clock|status|tasks". Guardado à parte do homeLayout (que diz
+    // O QUE está na Home); aqui só ONDE. Item sem posição salva ganha a 1ª célula livre. ---
+    private const val KEY_HOME_POSITIONS = "homePositionsJson"
+
+    fun homePositions(context: Context): Map<String, IntArray> {
+        val raw = of(context).getString(KEY_HOME_POSITIONS, null) ?: return emptyMap()
+        return try {
+            val obj = org.json.JSONObject(raw)
+            obj.keys().asSequence().mapNotNull { key ->
+                val arr = obj.optJSONArray(key) ?: return@mapNotNull null
+                if (arr.length() != 4) return@mapNotNull null
+                key to IntArray(4) { arr.getInt(it) }
+            }.toMap()
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    fun setHomePositions(context: Context, positions: Map<String, IntArray>) {
+        val obj = org.json.JSONObject()
+        positions.forEach { (key, v) -> obj.put(key, org.json.JSONArray(v.toList())) }
+        of(context).edit().putString(KEY_HOME_POSITIONS, obj.toString()).apply()
+    }
+
     // --- Colunas da grade da tela inicial (ajustável) ---
 
     fun homeGridColumns(context: Context): Int =

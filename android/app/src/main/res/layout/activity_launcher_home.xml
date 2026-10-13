@@ -115,8 +115,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:gravity="center"
-            android:paddingVertical="20dp">
+            android:gravity="center">
 
             <TextView
                 android:id="@+id/clockText"
@@ -254,27 +253,15 @@
                 android:clipToPadding="false" />
         </LinearLayout>
 
-        <!-- GRID DA TELA INICIAL: quantos apps o usuário quiser fixar aqui, com o
-             número de colunas que ele escolher em "Personalizar" -->
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/homeGridRecyclerView"
+        <!-- GRADE DA TELA INICIAL: células onde ficam os ícones e os widgets (relógio,
+             status e tarefas são movidos pra cá no onCreate). Toque e segure pra mover
+             ícones e mover/redimensionar widgets — ver HomeWorkspace. -->
+        <com.guardianshield.child.HomeWorkspace
+            android:id="@+id/homeWorkspace"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
-            android:clipToPadding="false"
-            android:paddingHorizontal="8dp" />
-
-        <TextView
-            android:id="@+id/emptyHomeHint"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:padding="32dp"
-            android:text="Toque e segure um app na gaveta para fixar aqui na tela inicial"
-            android:textColor="#99FFFFFF"
-            android:textSize="13sp"
-            android:visibility="gone" />
+            android:paddingHorizontal="0dp" />
 
         <!-- ALÇA DA GAVETA: toque ou arraste pra cima pra abrir. O chevron balança
              sozinho (ver setupDrawerHandleBounce em LauncherHomeActivity) só pra

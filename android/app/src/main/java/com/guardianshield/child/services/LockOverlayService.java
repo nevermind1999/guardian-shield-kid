@@ -73,6 +73,8 @@ public class LockOverlayService extends Service {
     // Largura do "cartão" central (todos os blocos — sempre-disponíveis, tarefas, PIN — se
     // alinham nessa mesma largura, em vez de cada um ter seu próprio valor solto).
     private static final int CONTENT_WIDTH_DP = 300;
+    // Largura real dos blocos dentro do popup: CONTENT_WIDTH_DP, ou menos em tela estreita.
+    private int contentWidthDp = CONTENT_WIDTH_DP;
     private static final String BG_DARK = "#0c0a09";
     private static final String COLOR_WARM_MUTED = "#A8A29E"; // subtítulos, labels
     private static final String COLOR_WARM_FAINT = "#79716B"; // legendas bem discretas
@@ -100,6 +102,12 @@ public class LockOverlayService extends Service {
     // Container raiz de tudo dentro do cartão — guardado como campo pra attemptPinUnlock
     // poder trocar o conteúdo inteiro pelo seletor de duração sem recriar a janela do zero.
     private LinearLayout contentLayout;
+    // Popup central (por cima da Home desfocada) com duas "páginas": a principal (motivo,
+    // tarefas, PIN…) e a do joguinho do gato — um botão troca entre elas.
+    private FrameLayout cardView;
+    private View mainPage;
+    private View gamePage;
+    private boolean backdropFromHome = false;
     // Minijogo "Alimente o Gatinho" — distração positiva enquanto a criança espera o
     // bloqueio passar (ver PixelCatGameView e buildCatGameCard). Guardado como campo só
     // pra poder chamar stop() explicitamente em hideOverlay (rede de segurança dupla com
@@ -214,20 +222,64 @@ public class LockOverlayService extends Service {
             windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
             pinUnlockAvailable = showPinField;
 
-            // ScrollView com fillViewport: se o conteúdo couber na tela, fica centralizado
-            // verticalmente; se não couber (várias tarefas, ou teclado aberto), rola.
-            ScrollView scrollRoot = new ScrollView(this);
-            scrollRoot.setFillViewport(true);
+            // Raiz: a Home desfocada (foto tirada pela própria Home, ver HomeSnapshot) +
+            // véu escuro, e o popup no meio. Sem a foto, fundo escuro sólido como antes.
+            FrameLayout scrollRoot = new FrameLayout(this);
             scrollRoot.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            scrollRoot.setBackground(buildRootBackground());
+            android.graphics.Bitmap homeShot = com.guardianshield.child.util.HomeSnapshot.capture();
+            backdropFromHome = homeShot != null;
+            if (homeShot != null) {
+                ImageView backdrop = new ImageView(this);
+                backdrop.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                android.graphics.drawable.BitmapDrawable shotDrawable = new android.graphics.drawable.BitmapDrawable(getResources(), homeShot);
+                shotDrawable.setFilterBitmap(true);
+                backdrop.setImageDrawable(shotDrawable);
+                scrollRoot.addView(backdrop, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                View veil = new View(this);
+                veil.setBackgroundColor(Color.argb(110, 0, 0, 0));
+                scrollRoot.addView(veil, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            } else {
+                scrollRoot.setBackground(buildRootBackground());
+            }
+            // Toque fora do popup não faz nada (e não chega na Home por baixo).
+            scrollRoot.setClickable(true);
 
+            android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+            int screenWDp = Math.round(metrics.widthPixels / metrics.density);
+            int cardWidthDp = Math.min(screenWDp - 32, 400);
+            contentWidthDp = Math.min(CONTENT_WIDTH_DP, cardWidthDp - 36);
+            int maxCardHeightPx = metrics.heightPixels - dp(120);
+
+            cardView = new FrameLayout(this);
+            cardView.setBackground(buildCardBackground());
+            cardView.setClipToOutline(true);
+            cardView.setElevation(dp(12));
+            FrameLayout.LayoutParams cardParams = new FrameLayout.LayoutParams(dp(cardWidthDp), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
+            scrollRoot.addView(cardView, cardParams);
+
+            MaxHeightScrollView mainScroll = new MaxHeightScrollView(this, maxCardHeightPx);
+            mainScroll.setVerticalScrollBarEnabled(false);
             LinearLayout layout = new LinearLayout(this);
             layout.setOrientation(LinearLayout.VERTICAL);
-            layout.setGravity(Gravity.CENTER);
-            layout.setLayoutParams(new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            layout.setPadding(dp(24), dp(48), dp(24), dp(40));
-            scrollRoot.addView(layout);
+            layout.setGravity(Gravity.CENTER_HORIZONTAL);
+            layout.setPadding(dp(18), dp(26), dp(18), dp(20));
+            mainScroll.addView(layout, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            cardView.addView(mainScroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            mainPage = mainScroll;
             contentLayout = layout;
+
+            MaxHeightScrollView gameScroll = new MaxHeightScrollView(this, maxCardHeightPx);
+            gameScroll.setVerticalScrollBarEnabled(false);
+            LinearLayout gameLayout = new LinearLayout(this);
+            gameLayout.setOrientation(LinearLayout.VERTICAL);
+            gameLayout.setGravity(Gravity.CENTER_HORIZONTAL);
+            gameLayout.setPadding(dp(18), dp(14), dp(18), dp(18));
+            gameLayout.addView(buildGameHeader());
+            gameLayout.addView(buildCatGameCard());
+            gameScroll.addView(gameLayout, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            gameScroll.setVisibility(View.GONE);
+            cardView.addView(gameScroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            gamePage = gameScroll;
 
             // --- Hero: círculo de vidro com ícone + selo pequeno + título + subtítulo,
             // direto sobre o fundo (sem cartão de vidro em volta — só os blocos abaixo
@@ -256,7 +308,7 @@ public class LockOverlayService extends Service {
             titleView.setTextColor(Color.WHITE);
             titleView.setTextSize(25);
             titleView.setGravity(Gravity.CENTER);
-            LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT);
+            LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(dp(contentWidthDp), LinearLayout.LayoutParams.WRAP_CONTENT);
             titleView.setLayoutParams(titleParams);
             layout.addView(titleView);
 
@@ -265,7 +317,7 @@ public class LockOverlayService extends Service {
             subtitleView.setTextColor(Color.parseColor(COLOR_WARM_MUTED));
             subtitleView.setTextSize(14.5f);
             subtitleView.setGravity(Gravity.CENTER);
-            LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT);
+            LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(dp(contentWidthDp), LinearLayout.LayoutParams.WRAP_CONTENT);
             subtitleParams.topMargin = dp(9);
             subtitleView.setLayoutParams(subtitleParams);
             layout.addView(subtitleView);
@@ -309,7 +361,7 @@ public class LockOverlayService extends Service {
             if (allowPinUnlock) {
                 timeRequestSlot = new LinearLayout(this);
                 timeRequestSlot.setOrientation(LinearLayout.VERTICAL);
-                LinearLayout.LayoutParams timeRequestSlotParams = new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT);
+                LinearLayout.LayoutParams timeRequestSlotParams = new LinearLayout.LayoutParams(dp(contentWidthDp), LinearLayout.LayoutParams.WRAP_CONTENT);
                 timeRequestSlotParams.topMargin = dp(10);
                 timeRequestSlot.setLayoutParams(timeRequestSlotParams);
                 layout.addView(timeRequestSlot);
@@ -322,7 +374,7 @@ public class LockOverlayService extends Service {
             if (showPinField) {
                 pinRevealSlot = new LinearLayout(this);
                 pinRevealSlot.setOrientation(LinearLayout.VERTICAL);
-                LinearLayout.LayoutParams slotParams = new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT);
+                LinearLayout.LayoutParams slotParams = new LinearLayout.LayoutParams(dp(contentWidthDp), LinearLayout.LayoutParams.WRAP_CONTENT);
                 slotParams.topMargin = dp(12);
                 pinRevealSlot.setLayoutParams(slotParams);
                 layout.addView(pinRevealSlot);
@@ -332,10 +384,9 @@ public class LockOverlayService extends Service {
                 pinInputView = null;
             }
 
-            // Minijogo por último, depois de tudo que é funcional (sempre-disponíveis,
-            // tarefas, emergência, PIN) — é uma distração extra, não deve competir por
-            // atenção com os controles de verdade. Aparece em qualquer motivo de bloqueio.
-            layout.addView(buildCatGameCard());
+            // Minijogo numa "página" própria do popup — aqui só o botão que leva até ele,
+            // por último, pra não competir com os controles de verdade.
+            layout.addView(buildGameButton());
 
             int layoutType;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -363,16 +414,32 @@ public class LockOverlayService extends Service {
             // ADJUST_PAN só desloca o conteúdo pra cima até o campo focado ficar visível,
             // sem depender do sistema encolher a janela.
             params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN;
+            // Cobre a tela inteira, inclusive atrás das barras de status e navegação — o fundo
+            // desfocado não pode deixar uma faixa da Home nítida em cima e embaixo.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                params.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                params.setFitInsetsTypes(0);
+            }
+            // Fundo (Home desfocada) por baixo das barras de status e navegação também.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                params.setFitInsetsTypes(0);
+                params.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+            }
 
             windowManager.addView(scrollRoot, params);
             overlayView = scrollRoot;
             isShowing = true;
             showing = true;
-            // Entra suave em vez de "pipocar" na tela.
+            // Entra suave: o fundo aparece e o popup cresce um pouco, como um diálogo.
             scrollRoot.setAlpha(0f);
             scrollRoot.animate().alpha(1f).setDuration(180).start();
+            cardView.setScaleX(0.92f);
+            cardView.setScaleY(0.92f);
+            cardView.animate().scaleX(1f).scaleY(1f).setDuration(220)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
             stealAudioFocusToPauseMedia();
-            if (catGameView != null) catGameView.start();
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -423,7 +490,7 @@ public class LockOverlayService extends Service {
         emergencyBg.setCornerRadius(dp(18));
         emergencyButton.setBackground(emergencyBg);
         emergencyButton.setPadding(dp(16), dp(15), dp(16), dp(15));
-        LinearLayout.LayoutParams emergencyParams = new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams emergencyParams = new LinearLayout.LayoutParams(dp(contentWidthDp), LinearLayout.LayoutParams.WRAP_CONTENT);
         emergencyButton.setLayoutParams(emergencyParams);
         emergencyButton.setOnClickListener(v -> callEmergencyNumber(emergencyPhone));
         return emergencyButton;
@@ -592,6 +659,98 @@ public class LockOverlayService extends Service {
         timeRequestSlot.addView(card);
     }
 
+    /** Fundo do popup: escuro quase opaco, com o brilho da cor de destaque no topo. */
+    private GradientDrawable buildCardBackground() {
+        int accent = accentColors()[0];
+        int dark = Color.parseColor(BG_DARK);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setGradientType(GradientDrawable.RADIAL_GRADIENT);
+        bg.setGradientRadius(dp(320));
+        bg.setGradientCenter(0.5f, 0.0f);
+        bg.setColors(new int[]{ withAlpha(blendOpaque(accent, dark, 0.38f), 245), withAlpha(dark, 242) });
+        bg.setCornerRadius(dp(28));
+        bg.setStroke(dp(1), Color.argb(40, 255, 255, 255));
+        return bg;
+    }
+
+    /** Botão que troca o popup pra página do joguinho. */
+    private View buildGameButton() {
+        Button button = new Button(this);
+        button.setText("🐱  Brincar com o gatinho");
+        button.setAllCaps(false);
+        button.setTextColor(Color.WHITE);
+        button.setTextSize(14.5f);
+        button.setBackground(buildGlassCard());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(contentWidthDp), dp(50));
+        params.topMargin = dp(14);
+        button.setLayoutParams(params);
+        button.setOnClickListener(v -> showGamePage(true));
+        return button;
+    }
+
+    /** Cabeçalho da página do joguinho: voltar + título. */
+    private View buildGameHeader() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(dp(contentWidthDp), LinearLayout.LayoutParams.WRAP_CONTENT);
+        row.setLayoutParams(rowParams);
+
+        TextView back = new TextView(this);
+        back.setText("‹  Voltar");
+        back.setTextColor(Color.WHITE);
+        back.setTextSize(15);
+        back.setPadding(dp(4), dp(10), dp(14), dp(10));
+        back.setOnClickListener(v -> showGamePage(false));
+        row.addView(back);
+
+        TextView title = new TextView(this);
+        title.setText("Gatinhos");
+        title.setTextColor(Color.parseColor(COLOR_WARM_MUTED));
+        title.setTextSize(13);
+        title.setGravity(Gravity.END);
+        row.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        return row;
+    }
+
+    /** Troca a página do popup (principal <-> joguinho) com um fade rápido. O jogo só roda
+     * enquanto a página dele está aberta. */
+    private void showGamePage(boolean showGame) {
+        if (mainPage == null || gamePage == null) return;
+        View from = showGame ? mainPage : gamePage;
+        View to = showGame ? gamePage : mainPage;
+        if (to.getVisibility() == View.VISIBLE) return;
+        if (showGame) {
+            if (catGameView != null) catGameView.start();
+        } else {
+            saveActiveCatState();
+            if (catGameView != null) catGameView.stop();
+        }
+        from.animate().alpha(0f).setDuration(120).withEndAction(() -> {
+            from.setVisibility(View.GONE);
+            from.setAlpha(1f);
+            to.setAlpha(0f);
+            to.setVisibility(View.VISIBLE);
+            to.animate().alpha(1f).setDuration(160).start();
+        }).start();
+    }
+
+    /** ScrollView com altura máxima: o popup cresce com o conteúdo até esse limite e daí rola. */
+    private static class MaxHeightScrollView extends ScrollView {
+        private final int maxHeightPx;
+
+        MaxHeightScrollView(Context context, int maxHeightPx) {
+            super(context);
+            this.maxHeightPx = maxHeightPx;
+            setFillViewport(false);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(maxHeightPx, MeasureSpec.AT_MOST));
+        }
+    }
+
     /**
      * Cartão quadrado (mesma largura do resto, CONTENT_WIDTH_DP x CONTENT_WIDTH_DP) com o
      * minijogo "Alimente o Gatinho" — ver PixelCatGameView. Guarda a instância em
@@ -602,7 +761,7 @@ public class LockOverlayService extends Service {
         LinearLayout wrapper = new LinearLayout(this);
         wrapper.setOrientation(LinearLayout.VERTICAL);
         wrapper.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams wrapperParams = new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams wrapperParams = new LinearLayout.LayoutParams(dp(contentWidthDp), LinearLayout.LayoutParams.WRAP_CONTENT);
         wrapperParams.topMargin = dp(16);
         wrapper.setLayoutParams(wrapperParams);
 
@@ -610,7 +769,7 @@ public class LockOverlayService extends Service {
 
         LinearLayout card = new LinearLayout(this);
         card.setBackground(buildGlassCard());
-        card.setLayoutParams(new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), dp(CONTENT_WIDTH_DP)));
+        card.setLayoutParams(new LinearLayout.LayoutParams(dp(contentWidthDp), dp(contentWidthDp)));
 
         activeCatIndex = GuardianPrefs.INSTANCE.selectedCatIndex(this);
         catGameView = new PixelCatGameView(this);
@@ -780,7 +939,7 @@ public class LockOverlayService extends Service {
     private LinearLayout buildCatStatsBar() {
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams columnParams = new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams columnParams = new LinearLayout.LayoutParams(dp(contentWidthDp), LinearLayout.LayoutParams.WRAP_CONTENT);
         columnParams.topMargin = dp(12);
         column.setLayoutParams(columnParams);
 
@@ -997,7 +1156,8 @@ public class LockOverlayService extends Service {
     private void refreshAccentColorsInPlace() {
         if (!isShowing || overlayView == null) return;
         try {
-            overlayView.setBackground(buildRootBackground());
+            if (!backdropFromHome) overlayView.setBackground(buildRootBackground());
+            if (cardView != null) cardView.setBackground(buildCardBackground());
             boolean neutralAccent = "blocked".equals(lastIconType);
             if (!neutralAccent) {
                 int accent = accentColors()[0];
@@ -1043,7 +1203,7 @@ public class LockOverlayService extends Service {
     private LinearLayout buildTaskListView() {
         LinearLayout container = new LinearLayout(this);
         container.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams containerParams = new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams containerParams = new LinearLayout.LayoutParams(dp(contentWidthDp), LinearLayout.LayoutParams.WRAP_CONTENT);
         containerParams.topMargin = dp(14);
         container.setLayoutParams(containerParams);
 
@@ -1297,7 +1457,7 @@ public class LockOverlayService extends Service {
         card.setGravity(Gravity.CENTER);
         card.setBackground(buildGlassCard());
         card.setPadding(dp(24), dp(28), dp(24), dp(26));
-        card.setLayoutParams(new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT));
+        card.setLayoutParams(new LinearLayout.LayoutParams(dp(contentWidthDp), LinearLayout.LayoutParams.WRAP_CONTENT));
 
         ImageView checkIcon = new ImageView(this);
         checkIcon.setImageResource(R.drawable.ic_check_hero);
@@ -1383,7 +1543,7 @@ public class LockOverlayService extends Service {
         card.setGravity(Gravity.CENTER);
         card.setBackground(buildGlassCard());
         card.setPadding(dp(24), dp(28), dp(24), dp(28));
-        card.setLayoutParams(new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT));
+        card.setLayoutParams(new LinearLayout.LayoutParams(dp(contentWidthDp), LinearLayout.LayoutParams.WRAP_CONTENT));
 
         TextView title = new TextView(this);
         title.setText("⏱ Duração personalizada");
@@ -1473,7 +1633,7 @@ public class LockOverlayService extends Service {
 
         LinearLayout wrapper = new LinearLayout(this);
         wrapper.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams wrapperParams = new LinearLayout.LayoutParams(dp(CONTENT_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams wrapperParams = new LinearLayout.LayoutParams(dp(contentWidthDp), LinearLayout.LayoutParams.WRAP_CONTENT);
         wrapperParams.topMargin = dp(18);
         wrapper.setLayoutParams(wrapperParams);
 
@@ -1614,6 +1774,10 @@ public class LockOverlayService extends Service {
             timeRequestSending = false;
             taskListContainer = null;
             contentLayout = null;
+            cardView = null;
+            mainPage = null;
+            gamePage = null;
+            backdropFromHome = false;
             isShowing = false;
             showing = false;
             releaseAudioFocus();

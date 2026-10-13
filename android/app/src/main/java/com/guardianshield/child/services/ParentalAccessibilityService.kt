@@ -62,6 +62,49 @@ class ParentalAccessibilityService : AccessibilityService() {
         /** Espera entre tentativas quando a consulta falha (sem internet etc), crescente. */
         private const val RULE_SYNC_RETRY_MIN_MS = 5_000L
         private const val RULE_SYNC_RETRY_MAX_MS = 60_000L
+
+        /** O serviço ligado agora (null se a Acessibilidade estiver desligada). */
+        @Volatile var instance: ParentalAccessibilityService? = null
+            private set
+    }
+
+    private var lastBackdropCaptureAt = 0L
+
+    /**
+     * Print da tela (só chamado com a Home do GuardianShield em primeiro plano, ver
+     * LauncherHomeActivity) reduzido e desfocado na hora — fundo do popup da tela de
+     * bloqueio, com o papel de parede de verdade. Fica só na memória, nunca vai pro disco
+     * nem pra rede. Android 11+; antes disso o popup usa o desenho da própria Home.
+     */
+    fun captureHomeBackdrop() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        if (LockOverlayService.showing) return // não fotografa o próprio popup
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastBackdropCaptureAt < 3_000) return
+        lastBackdropCaptureAt = now
+        try {
+            takeScreenshot(android.view.Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    try {
+                        val hw = android.graphics.Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                        result.hardwareBuffer.close()
+                        if (hw == null) return
+                        val small = android.graphics.Bitmap.createScaledBitmap(
+                            hw.copy(android.graphics.Bitmap.Config.ARGB_8888, false),
+                            (hw.width / 8).coerceAtLeast(1), (hw.height / 8).coerceAtLeast(1), true
+                        )
+                        hw.recycle()
+                        com.guardianshield.child.util.HomeSnapshot.cachedScreen = com.guardianshield.child.util.HomeSnapshot.boxBlur(small, 2, 2)
+                    } catch (e: Exception) {
+                        Log.w("GuardianShield", "Print do fundo falhou: ${e.message}")
+                    }
+                }
+
+                override fun onFailure(errorCode: Int) {}
+            })
+        } catch (e: Exception) {
+            // Permissão de print não concedida nesta versão da config — fica o fallback.
+        }
     }
 
     private val tickHandler = Handler(Looper.getMainLooper())
@@ -128,6 +171,7 @@ class ParentalAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        instance = this
         startUsageTicker()
         startRuleSyncLoop()
         if (!screenStateReceiverRegistered) {
@@ -644,6 +688,7 @@ class ParentalAccessibilityService : AccessibilityService() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
+        if (instance === this) instance = null
         tickRunnable?.let { tickHandler.removeCallbacks(it) }
         ruleSyncRunning = false
         if (screenStateReceiverRegistered) {
