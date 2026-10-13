@@ -19,6 +19,7 @@ import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -101,7 +102,6 @@ class LauncherHomeActivity : AppCompatActivity() {
     private lateinit var emptyHomeHint: View
     private lateinit var videoWallpaper: TextureView
 
-    private lateinit var swipeUpDetector: GestureDetectorCompat
 
     // --- Vídeo de fundo: só existe enquanto a Home está em primeiro plano ---
     private var mediaPlayer: MediaPlayer? = null
@@ -284,17 +284,14 @@ class LauncherHomeActivity : AppCompatActivity() {
         drawerHandle.setOnTouchListener { _, event -> drawerHandleDetector.onTouchEvent(event) }
         setupDrawerHandleBounce()
 
-        // Relógio e pílula de status só respondem a arrastar pra cima (toque simples neles
-        // não faz nada além do que já fazem, ex: o botão "Tempo extra" dentro da pílula).
-        swipeUpDetector = GestureDetectorCompat(this, SwipeUpListener(treatTapAsSwipe = false) { openDrawer() })
-        val swipeTouchListener = View.OnTouchListener { _, event -> swipeUpDetector.onTouchEvent(event) }
-        findViewById<View>(R.id.clockContainer).setOnTouchListener(swipeTouchListener)
-        findViewById<View>(R.id.statusPill).setOnTouchListener(swipeTouchListener)
+        // Arrastar pra cima em qualquer outro lugar da Home também abre a gaveta — ver
+        // dispatchTouchEvent.
+        swipeSlopPx = 40 * resources.displayMetrics.density
 
         homeAdapter = HomeGridAdapter(
             items = emptyList(),
             appsByPackage = emptyMap(),
-            onLaunchApp = { app -> AppRepository.launch(this, app.packageName) },
+            onLaunchApp = { app, icon -> AppRepository.launch(this, app.packageName, icon) },
             onOpenFolder = { folder -> showFolderContents(folder) },
             onLongPressApp = { app, holder -> showAppOptionsMenu(app, holder) },
             onLongPressFolder = { folder, holder -> showFolderOptionsMenu(folder, holder) }
@@ -393,11 +390,74 @@ class LauncherHomeActivity : AppCompatActivity() {
     }
 
     private fun openDrawer() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastDrawerOpenAt < 700) return // alça e gesto global no mesmo arrasto
+        lastDrawerOpenAt = now
         startActivity(Intent(this, LauncherDrawerActivity::class.java))
         overridePendingTransition(R.anim.slide_up_in, R.anim.stay_still)
     }
 
     // ============================== GAVETA: gesto de arrastar ==============================
+
+    private var lastDrawerOpenAt = 0L
+    private var swipeSlopPx = 0f
+    private var swipeStartX = 0f
+    private var swipeStartY = 0f
+    private var swipeTracking = false
+    private var swipeConsumed = false
+    private var iconDragActive = false
+
+    /**
+     * Arrastar pra cima em qualquer ponto da Home abre a gaveta, como nos launchers do
+     * Android. Fica de fora: arrastar dentro da grade quando ela tem mais ícones do que cabe
+     * (aí o gesto rola a grade) e o arrasto de "Mover" um ícone. Quando o gesto vira
+     * "abrir gaveta", os filhos recebem CANCEL — nada de toque fantasma num ícone.
+     */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                swipeStartX = ev.rawX
+                swipeStartY = ev.rawY
+                swipeConsumed = false
+                swipeTracking = !iconDragActive && !startsOnScrollableGrid(ev)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (swipeConsumed) return true
+                if (swipeTracking && !iconDragActive) {
+                    val dy = ev.rawY - swipeStartY
+                    val dx = ev.rawX - swipeStartX
+                    if (dy < -swipeSlopPx && abs(dy) > abs(dx) * 1.5f) {
+                        swipeTracking = false
+                        swipeConsumed = true
+                        val cancel = MotionEvent.obtain(ev).apply { action = MotionEvent.ACTION_CANCEL }
+                        super.dispatchTouchEvent(cancel)
+                        cancel.recycle()
+                        openDrawer()
+                        return true
+                    }
+                    if (abs(dx) > swipeSlopPx * 1.5f || dy > swipeSlopPx) swipeTracking = false
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                swipeTracking = false
+                if (swipeConsumed) {
+                    swipeConsumed = false
+                    return true
+                }
+            }
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private fun startsOnScrollableGrid(ev: MotionEvent): Boolean {
+        val grid = homeGridRecyclerView
+        if (grid.visibility != View.VISIBLE) return false
+        if (!grid.canScrollVertically(1) && !grid.canScrollVertically(-1)) return false
+        val loc = IntArray(2)
+        grid.getLocationOnScreen(loc)
+        return ev.rawX >= loc[0] && ev.rawX <= loc[0] + grid.width &&
+            ev.rawY >= loc[1] && ev.rawY <= loc[1] + grid.height
+    }
 
     /**
      * Detecta "arrastar pra cima" tanto por velocidade (fling rápido, gesto real de dedo)
@@ -493,8 +553,14 @@ class LauncherHomeActivity : AppCompatActivity() {
                 // Não usamos swipe-para-remover — só arrastar pra reordenar/juntar.
             }
 
+            override fun onSelectedChanged(viewHolder: RecyclerView.ViewHolder?, actionState: Int) {
+                super.onSelectedChanged(viewHolder, actionState)
+                if (actionState == ItemTouchHelper.ACTION_STATE_DRAG) iconDragActive = true
+            }
+
             override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
                 super.clearView(recyclerView, viewHolder)
+                iconDragActive = false
                 val mergeTarget = pendingMergeTargetPosition
                 pendingMergeTargetPosition = null
                 homeAdapter.setHoverTarget(null)
@@ -675,7 +741,13 @@ class LauncherHomeActivity : AppCompatActivity() {
         val dailyLimit = GuardianPrefs.dailyLimitMinutes(this)
         val used = GuardianPrefs.usedMinutesToday(this)
         val remaining = (dailyLimit - used).coerceAtLeast(0)
-        remainingTimeText.text = "⏳ ${remaining / 60}h ${remaining % 60}m restantes"
+        remainingTimeText.text = when {
+            // Modo "ganhar tempo": sem tarefa aprovada ainda, o limite é 0 de propósito.
+            dailyLimit <= 0 && GuardianPrefs.taskUnlockMode(this) == "earn" -> "⏳ Ganhe tempo com tarefas"
+            remaining <= 0 -> "⏳ Tempo de hoje acabou"
+            remaining < 60 -> "⏳ ${remaining}min restantes"
+            else -> "⏳ ${remaining / 60}h ${remaining % 60}min restantes"
+        }
 
         // Verde -> âmbar -> vermelho conforme o tempo usado hoje se aproxima do limite,
         // pra dar um aviso visual antes do bloqueio por tempo esgotado pegar de surpresa.
@@ -717,9 +789,33 @@ class LauncherHomeActivity : AppCompatActivity() {
             return
         }
         appLoader.execute {
+            // 1ª abertura (processo novo): primeiro só os ícones da Home, que são poucos e
+            // saem rápido; a lista completa (pra gaveta e limpeza dos fixados) vem depois.
+            if (apps.isEmpty()) {
+                val homePackages = GuardianPrefs.homeLayout(this).flatMap {
+                    when (it) {
+                        is GuardianPrefs.HomeItem.AppItem -> listOf(it.packageName)
+                        is GuardianPrefs.HomeItem.FolderItem -> it.packages
+                    }
+                }
+                if (homePackages.isNotEmpty()) {
+                    val some = AppRepository.loadSome(this, homePackages)
+                    runOnUiThread { if (!isDestroyed && apps.isEmpty() && some.isNotEmpty()) showHomeAppsEarly(some) }
+                }
+            }
             val loaded = AppRepository.loadLaunchableApps(this)
             runOnUiThread { if (!isDestroyed) applyInstalledApps(loaded) }
         }
+    }
+
+    /** Desenha a grade com só os apps da Home, sem mexer nos fixados (a lista parcial não
+     * pode ser usada pra "limpar" apps que não estão nela). */
+    private fun showHomeAppsEarly(homeApps: List<AppEntry>) {
+        val items = GuardianPrefs.homeLayout(this)
+        homeAdapter.updateItems(items, homeApps.associateBy { it.packageName })
+        homeAdapter.updateBlockedState(GuardianPrefs.blockedPackages(this), GuardianPrefs.isPauseAllActive(this), GuardianPrefs.alwaysAvailablePackages(this))
+        homeGridRecyclerView.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
+        emptyHomeHint.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
     }
 
     private fun applyInstalledApps(loaded: List<AppEntry>) {

@@ -24,7 +24,7 @@ import com.guardianshield.child.util.GuardianPrefs.HomeItem
 class HomeGridAdapter(
     private var items: List<HomeItem>,
     private var appsByPackage: Map<String, AppEntry>,
-    private val onLaunchApp: (AppEntry) -> Unit,
+    private val onLaunchApp: (AppEntry, View) -> Unit,
     private val onOpenFolder: (HomeItem.FolderItem) -> Unit,
     private val onLongPressApp: (AppEntry, RecyclerView.ViewHolder) -> Unit,
     private val onLongPressFolder: (HomeItem.FolderItem, RecyclerView.ViewHolder) -> Unit
@@ -193,7 +193,7 @@ class HomeGridAdapter(
             blocked: Boolean,
             alwaysAvailable: Boolean,
             hovered: Boolean,
-            onLaunch: (AppEntry) -> Unit,
+            onLaunch: (AppEntry, View) -> Unit,
             onLongPress: (AppEntry, RecyclerView.ViewHolder) -> Unit
         ) {
             iconImage.setImageDrawable(app.icon)
@@ -216,12 +216,8 @@ class HomeGridAdapter(
             } else {
                 iconImage.colorFilter = null
                 iconFrame.isClickable = true
-                iconFrame.setOnClickListener {
-                    it.animate().scaleX(0.88f).scaleY(0.88f).setDuration(80).withEndAction {
-                        it.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
-                    }.start()
-                    onLaunch(app)
-                }
+                // O "afundar" ao tocar vem do stateListAnimator do item_app_icon.xml.
+                iconFrame.setOnClickListener { onLaunch(app, it) }
             }
 
             val longClickListener = View.OnLongClickListener { onLongPress(app, this); true }

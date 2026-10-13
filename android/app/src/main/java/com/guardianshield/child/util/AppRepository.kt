@@ -1,6 +1,8 @@
 package com.guardianshield.child.util
 
+import android.app.ActivityOptions
 import android.content.Context
+import android.view.View
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.os.Build
@@ -85,9 +87,40 @@ object AppRepository {
             .toList()
     }
 
-    fun launch(context: Context, packageName: String) {
+    /** Só os apps pedidos (os da Home) — rápido, pra Home aparecer com os ícones logo na
+     * 1ª abertura enquanto a lista completa ainda está sendo montada. Fora da main thread. */
+    fun loadSome(context: Context, packages: Collection<String>): List<AppEntry> {
+        cachedIfFresh(context)?.let { all -> return all.filter { it.packageName in packages } }
+        val pm = context.packageManager
+        return packages.mapNotNull { packageName ->
+            try {
+                val launch = pm.getLaunchIntentForPackage(packageName) ?: return@mapNotNull null
+                val info = pm.resolveActivity(launch, 0) ?: return@mapNotNull null
+                AppEntry(
+                    packageName = packageName,
+                    label = info.loadLabel(pm).toString(),
+                    icon = info.loadIcon(pm),
+                    category = categoryOf(info.activityInfo.applicationInfo),
+                    installedAt = 0L
+                )
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
+    /** Abre o app; com [source] (o ícone tocado), a janela nasce do ícone, como nos
+     * launchers do Android. */
+    fun launch(context: Context, packageName: String, source: View? = null) {
         val intent = context.packageManager.getLaunchIntentForPackage(packageName) ?: return
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(intent)
+        val options = source?.takeIf { it.width > 0 && it.height > 0 }?.let {
+            ActivityOptions.makeClipRevealAnimation(it, 0, 0, it.width, it.height).toBundle()
+        }
+        try {
+            context.startActivity(intent, options)
+        } catch (e: Exception) {
+            context.startActivity(intent)
+        }
     }
 }

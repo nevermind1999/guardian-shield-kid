@@ -124,6 +124,9 @@
                 android:layout_height="wrap_content"
                 android:textColor="#FFFFFF"
                 android:textSize="48sp"
+                android:shadowColor="#80000000"
+                android:shadowDy="2"
+                android:shadowRadius="8"
                 android:textStyle="bold" />
 
             <TextView
@@ -131,7 +134,10 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:textColor="#CCFFFFFF"
+                android:textColor="#E6FFFFFF"
+                android:shadowColor="#99000000"
+                android:shadowDy="1"
+                android:shadowRadius="5"
                 android:textSize="15sp" />
         </LinearLayout>
 
@@ -163,7 +169,12 @@
                 <TextView
                     android:id="@+id/remainingTimeText"
                     android:layout_width="0dp"
-                    android:layout_height="wrap_content"
+                    android:layout_height="20dp"
+                    android:gravity="center_vertical"
+                    android:maxLines="1"
+                    android:autoSizeTextType="uniform"
+                    android:autoSizeMinTextSize="10sp"
+                    android:autoSizeMaxTextSize="13sp"
                     android:layout_weight="1"
                     android:layout_marginStart="16dp"
                     android:textColor="#CCFFFFFF"

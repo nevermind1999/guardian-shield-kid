@@ -16,6 +16,7 @@
         android:layout_height="56dp"
         android:background="@drawable/bg_app_icon"
         android:foreground="?android:attr/selectableItemBackgroundBorderless"
+        android:stateListAnimator="@animator/icon_press"
         android:clickable="true"
         android:focusable="true">
 
@@ -40,6 +41,9 @@
         android:layout_marginTop="4dp"
         android:gravity="center"
         android:textColor="#FFFFFF"
+        android:shadowColor="#B3000000"
+        android:shadowDy="1"
+        android:shadowRadius="4"
         android:textSize="11sp"
         android:maxLines="1"
         android:ellipsize="end" />
