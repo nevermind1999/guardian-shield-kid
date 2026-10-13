@@ -453,6 +453,33 @@ object GuardianPrefs {
         editor.apply()
     }
 
+    /**
+     * O pai despareou este celular (o backend respondeu "unpaired"): esquece o token e
+     * zera as regras da família — sem pareamento nada é bloqueado e a Home não mostra
+     * tarefas de ninguém. Personalização da Home (ícones, widgets, papel de parede) fica.
+     */
+    fun forgetPairing(context: Context) {
+        setDeviceToken(context, null)
+        saveRulesSync(
+            context,
+            unlockMode = "off",
+            dailyLimitMinutes = 120,
+            isPauseAllActive = false,
+            blockedPackages = emptySet(),
+            alwaysAvailablePackages = emptySet(),
+            unlockPinHash = null,
+            emergencyPhone = null,
+            rawTasksJson = "{}"
+        )
+        val off = ScheduleWindow(false, "22:00", "07:00")
+        saveScheduleSync(context, off, off.copy(start = "14:00", end = "17:00"), false, null, null)
+    }
+
+    /** Resposta do backend dizendo que este aparelho foi despareado (HTTP 401 + "unpaired"). */
+    @JvmStatic
+    fun isUnpairedResponse(code: Int, body: String?): Boolean =
+        code == 401 && body?.contains("\"unpaired\":true") == true
+
     // --- Histórico local de apps abertos (fila antes de sincronizar) — cada entrada vira
     // uma linha na tela de Histórico do app do Pai e alimenta o "último acesso" da Home
     // de lá. Guardado aqui (não só em memória) pra não perder nada se o processo morrer

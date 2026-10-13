@@ -17,6 +17,7 @@ import java.net.URL
 object NetworkHelper {
     @JvmStatic
     fun postJson(context: Context, path: String, jsonBody: String): Boolean {
+        if (!GuardianPrefs.isPaired(context)) return false
         val candidates = (listOfNotNull(GuardianPrefs.lastWorkingServerUrl(context)) + ServerConfig.SERVER_URL_CANDIDATES).distinct()
         for (baseUrl in candidates) {
             try {

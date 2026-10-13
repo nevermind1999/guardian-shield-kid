@@ -336,6 +336,9 @@ class ParentalAccessibilityService : AccessibilityService() {
      * conhecido. Retorna quais atualizações forçadas o pai pediu nesse ciclo (GPS/sincronizar).
      */
     private fun pollRulesSync(waitSeconds: Int): SyncFlags? {
+        // Sem pareamento não há família pra seguir (antes caía na família "legada" do
+        // servidor e obedecia regras de alguém).
+        if (!GuardianPrefs.isPaired(this)) return null
         val candidates = (listOfNotNull(GuardianPrefs.lastWorkingServerUrl(this)) + ServerConfig.SERVER_URL_CANDIDATES).distinct()
         val query = ruleSyncVersion?.takeIf { waitSeconds > 0 }?.let { "?wait=$waitSeconds&v=$it" }.orEmpty()
         for (baseUrl in candidates) {
@@ -345,6 +348,12 @@ class ParentalAccessibilityService : AccessibilityService() {
                 connection.readTimeout = (waitSeconds + 10) * 1_000
                 connection.requestMethod = "GET"
                 GuardianPrefs.deviceToken(this)?.let { connection.setRequestProperty("X-Device-Token", it) }
+                if (connection.responseCode == 401) {
+                    val errorBody = connection.errorStream?.bufferedReader()?.use { it.readText() }
+                    connection.disconnect()
+                    if (GuardianPrefs.isUnpairedResponse(401, errorBody)) handleUnpaired()
+                    return null
+                }
                 if (connection.responseCode == 200) {
                     val body = connection.inputStream.bufferedReader().use { it.readText() }
                     val json = JSONObject(body)
@@ -429,7 +438,20 @@ class ParentalAccessibilityService : AccessibilityService() {
      * Compartilhado por apps-sync, location-sync e pin-unlock-ack. Retorna se algum
      * candidato respondeu 200.
      */
+    /** O pai despareou este celular: esquece o pareamento, tira qualquer bloqueio da tela
+     * e avisa a criança. */
+    private fun handleUnpaired() {
+        if (!GuardianPrefs.isPaired(this)) return
+        GuardianPrefs.forgetPairing(this)
+        ruleSyncVersion = null
+        tickHandler.post {
+            reevaluateBlockState()
+            Toast.makeText(this, "Este celular foi desconectado da conta dos pais.", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun postJson(path: String, jsonBody: String): Boolean {
+        if (!GuardianPrefs.isPaired(this)) return false
         val candidates = (listOfNotNull(GuardianPrefs.lastWorkingServerUrl(this)) + ServerConfig.SERVER_URL_CANDIDATES).distinct()
         for (baseUrl in candidates) {
             try {
@@ -445,6 +467,13 @@ class ParentalAccessibilityService : AccessibilityService() {
                     GuardianPrefs.setLastWorkingServerUrl(this, baseUrl)
                     connection.disconnect()
                     return true
+                }
+                if (connection.responseCode == 401 &&
+                    GuardianPrefs.isUnpairedResponse(401, connection.errorStream?.bufferedReader()?.use { it.readText() })
+                ) {
+                    connection.disconnect()
+                    handleUnpaired()
+                    return false
                 }
                 connection.disconnect()
             } catch (e: Exception) {
@@ -779,6 +808,12 @@ class ParentalAccessibilityService : AccessibilityService() {
      */
     private fun reevaluateBlockState() {
         val packageName = lastForegroundPackage ?: return
+
+        // Sem pareamento, nada bloqueia (despareado pelo pai, ou ainda não pareado).
+        if (!GuardianPrefs.isPaired(this)) {
+            hideOverlay()
+            return
+        }
 
         // Apps marcados pelo pai como "sempre disponível" (ver GuardianPrefs.alwaysAvailablePackages)
         // furam TODOS os bloqueios — Pausa Geral, tarefas pendentes, tempo esgotado e
