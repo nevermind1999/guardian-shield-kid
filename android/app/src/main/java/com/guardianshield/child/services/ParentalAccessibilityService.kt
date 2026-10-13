@@ -91,10 +91,10 @@ class ParentalAccessibilityService : AccessibilityService() {
                         if (hw == null) return
                         val small = android.graphics.Bitmap.createScaledBitmap(
                             hw.copy(android.graphics.Bitmap.Config.ARGB_8888, false),
-                            (hw.width / 8).coerceAtLeast(1), (hw.height / 8).coerceAtLeast(1), true
+                            (hw.width / 4).coerceAtLeast(1), (hw.height / 4).coerceAtLeast(1), true
                         )
                         hw.recycle()
-                        com.guardianshield.child.util.HomeSnapshot.cachedScreen = com.guardianshield.child.util.HomeSnapshot.boxBlur(small, 2, 2)
+                        com.guardianshield.child.util.HomeSnapshot.cachedScreen = com.guardianshield.child.util.HomeSnapshot.boxBlur(small, 1, 2)
                     } catch (e: Exception) {
                         Log.w("GuardianShield", "Print do fundo falhou: ${e.message}")
                     }

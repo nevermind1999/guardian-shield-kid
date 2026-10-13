@@ -236,7 +236,7 @@ public class LockOverlayService extends Service {
                 backdrop.setImageDrawable(shotDrawable);
                 scrollRoot.addView(backdrop, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
                 View veil = new View(this);
-                veil.setBackgroundColor(Color.argb(110, 0, 0, 0));
+                veil.setBackgroundColor(Color.argb(70, 0, 0, 0));
                 scrollRoot.addView(veil, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             } else {
                 scrollRoot.setBackground(buildRootBackground());

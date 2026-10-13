@@ -526,7 +526,7 @@ class LauncherHomeActivity : AppCompatActivity() {
     }
 
     /**
-     * A Home desenhada pequena (1/8) e desfocada — fundo do popup da tela de bloqueio (ver
+     * A Home desenhada pequena (1/4) e desfocada — fundo do popup da tela de bloqueio (ver
      * HomeSnapshot). Papel de parede: o vídeo, se tiver; senão o do sistema (se o Android
      * deixar ler) ou um degradê escuro. Por cima, os ícones e widgets.
      */
@@ -535,7 +535,7 @@ class LauncherHomeActivity : AppCompatActivity() {
         val w = window.decorView.width
         val h = window.decorView.height
         if (w <= 0 || h <= 0) return null
-        val scale = 1f / 8f
+        val scale = 1f / 4f
         val small = Bitmap.createBitmap((w * scale).toInt().coerceAtLeast(1), (h * scale).toInt().coerceAtLeast(1), Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(small)
         canvas.drawColor(0xFF1C1917.toInt())
@@ -569,7 +569,7 @@ class LauncherHomeActivity : AppCompatActivity() {
             // Algum ícone com bitmap de hardware não desenha em canvas comum — fica só o fundo.
         }
         canvas.restore()
-        return HomeSnapshot.boxBlur(small, 2, 2)
+        return HomeSnapshot.boxBlur(small, 1, 2)
     }
 
     private fun drawWallpaperColors(canvas: android.graphics.Canvas, w: Int, h: Int) {
