@@ -20,8 +20,11 @@
     <!-- UpdaterModule: instalar o APK de atualização baixado via DownloadManager
          (não é uma permissão perigosa em tempo de execução — o usuário concede uma
          vez em Configurações se ainda não tiver permitido "instalar apps desconhecidos"
-         pra este app; ver promptInstallDownloadedUpdate em MainActivity.java). -->
+         pra este app; ver instalarAtualizacao em PainelActivity.kt). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Item "Sem economia de bateria" do checklist do painel: evita que otimizadores de
+         bateria do fabricante matem o serviço de proteção em segundo plano. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Foto de comprovação das tarefas diárias (LauncherHomeActivity): usa TakePicture(),
          que delega pro app de câmera do sistema via intent — NÃO precisa da permissão
          CAMERA (essa é só pra quem acessa a API de câmera diretamente). Declará-la sem
@@ -37,19 +40,19 @@
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
+        <!-- Painel nativo: pareamento, checklist de permissões, tempo restante e pedido de
+             tempo extra (antes era uma WebView com React/Capacitor). -->
         <activity
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation"
-            android:name=".MainActivity"
-            android:label="@string/title_activity_main"
-            android:theme="@style/AppTheme.NoActionBar"
+            android:name=".PainelActivity"
+            android:label="@string/app_name"
+            android:theme="@style/AppTheme.Painel"
             android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
             android:exported="true">
-
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
         </activity>
 
         <!-- Tela inicial (Home) nativa em Kotlin — substitui o launcher original do aparelho -->

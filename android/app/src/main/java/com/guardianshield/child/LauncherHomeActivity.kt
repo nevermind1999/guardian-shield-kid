@@ -175,16 +175,35 @@ class LauncherHomeActivity : AppCompatActivity() {
         }
     }
 
+    // Chaves que mudam o tempo todo em segundo plano mas não aparecem na Home (histórico de
+    // apps a enviar, minijogo da tela de bloqueio, cache de servidor…) — antes qualquer
+    // gravação dessas redesenhava a Home inteira.
+    private val keysIgnoredByHome = setOf(
+        "appUsageHistoryQueue", "lastWorkingServerUrl", "selectedCatIndex", "lockAccentThemeIndex",
+        "lowTimeWarningShownDate", "taskSubmissionAllowedUntil", "pendingPinUnlockAck", "dismissedUpdateSha",
+        "pinOverrideUntilMillis", "deviceToken"
+    )
+
+    // Uma sincronização grava várias chaves de uma vez — agrupa num redesenho só.
+    private val refreshHomeGridRunnable = Runnable { refreshHomeGrid() }
+
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == null || key in keysIgnoredByHome || key.startsWith("cat_")) return@OnSharedPreferenceChangeListener
         runOnUiThread {
             when (key) {
                 "homeGridColumns" -> applyGridColumns()
                 "themeColorStart", "themeColorEnd" -> applyThemeColors()
                 "homeVideoWallpaperUri" -> setupVideoWallpaper()
-                else -> refreshHomeGrid()
+                else -> {
+                    clockHandler.removeCallbacks(refreshHomeGridRunnable)
+                    clockHandler.postDelayed(refreshHomeGridRunnable, 120)
+                }
             }
         }
     }
+
+    // Lista de apps montada fora da thread principal (ver AppRepository.cachedIfFresh).
+    private val appLoader = Executors.newSingleThreadExecutor()
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -200,6 +219,7 @@ class LauncherHomeActivity : AppCompatActivity() {
      */
     private val packageChangeReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            AppRepository.invalidate()
             refreshInstalledAppsAndGrid()
         }
     }
@@ -244,15 +264,15 @@ class LauncherHomeActivity : AppCompatActivity() {
         }
 
         findViewById<ImageButton>(R.id.settingsButton).setOnClickListener {
-            startActivity(Intent(this, MainActivity::class.java))
+            startActivity(Intent(this, PainelActivity::class.java))
         }
         emergencyCallButton.setOnClickListener { callEmergencyNumber() }
         findViewById<ImageButton>(R.id.paletteButton).setOnClickListener {
             showCustomizeDialog()
         }
         requestTimeButton.setOnClickListener {
-            val intent = Intent(this, MainActivity::class.java)
-            intent.putExtra("open_request_modal", true)
+            val intent = Intent(this, PainelActivity::class.java)
+            intent.putExtra(PainelActivity.EXTRA_ABRIR_PEDIDO_TEMPO, true)
             startActivity(intent)
         }
 
@@ -271,12 +291,6 @@ class LauncherHomeActivity : AppCompatActivity() {
         findViewById<View>(R.id.clockContainer).setOnTouchListener(swipeTouchListener)
         findViewById<View>(R.id.statusPill).setOnTouchListener(swipeTouchListener)
 
-        apps = AppRepository.loadLaunchableApps(this)
-        // Primeira vez que a Home abre: fixa os primeiros apps automaticamente pra não
-        // começar vazia. Depois disso o usuário controla 100% via toque e segure.
-        if (!GuardianPrefs.hasInitializedPinnedApps(this) && apps.isNotEmpty()) {
-            GuardianPrefs.setPinnedHomeApps(this, apps.take(8).map { it.packageName })
-        }
         homeAdapter = HomeGridAdapter(
             items = emptyList(),
             appsByPackage = emptyMap(),
@@ -294,7 +308,7 @@ class LauncherHomeActivity : AppCompatActivity() {
 
         applyGridColumns()
         applyThemeColors()
-        refreshHomeGrid()
+        refreshInstalledAppsAndGrid()
         setupVideoWallpaper()
         handleTaskCameraIntentExtra(intent)
 
@@ -375,6 +389,7 @@ class LauncherHomeActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         taskSubmitExecutor.shutdown()
+        appLoader.shutdown()
     }
 
     private fun openDrawer() {
@@ -695,7 +710,25 @@ class LauncherHomeActivity : AppCompatActivity() {
      * acumulando ali indefinidamente).
      */
     private fun refreshInstalledAppsAndGrid() {
-        apps = AppRepository.loadLaunchableApps(this)
+        // Caminho rápido (o normal ao voltar pra Home): nada foi instalado/removido, usa o
+        // cache na hora. Senão monta a lista em segundo plano e aplica quando ficar pronta.
+        AppRepository.cachedIfFresh(this)?.let {
+            applyInstalledApps(it)
+            return
+        }
+        appLoader.execute {
+            val loaded = AppRepository.loadLaunchableApps(this)
+            runOnUiThread { if (!isDestroyed) applyInstalledApps(loaded) }
+        }
+    }
+
+    private fun applyInstalledApps(loaded: List<AppEntry>) {
+        apps = loaded
+        // Primeira vez que a Home abre: fixa os primeiros apps automaticamente pra não
+        // começar vazia. Depois disso o usuário controla 100% via toque e segure.
+        if (!GuardianPrefs.hasInitializedPinnedApps(this) && apps.isNotEmpty()) {
+            GuardianPrefs.setPinnedHomeApps(this, apps.take(8).map { it.packageName })
+        }
         val installedPackages = apps.map { it.packageName }.toSet()
         val currentPinned = GuardianPrefs.pinnedHomeApps(this)
         val cleanedPinned = currentPinned.filter { it in installedPackages }
@@ -707,6 +740,14 @@ class LauncherHomeActivity : AppCompatActivity() {
 
     private fun refreshHomeGrid() {
         updateBatteryAndTime()
+        if (apps.isEmpty()) {
+            // Lista de apps ainda sendo montada (1ª abertura) — só os widgets por enquanto,
+            // a grade entra assim que applyInstalledApps rodar.
+            refreshTasksWidget()
+            refreshScheduleHint()
+            refreshPermissionWarning()
+            return
+        }
         val items = GuardianPrefs.homeLayout(this)
         val appsByPackage = apps.associateBy { it.packageName }
         homeAdapter.updateItems(items, appsByPackage)

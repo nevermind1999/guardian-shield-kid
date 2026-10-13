@@ -5,11 +5,10 @@ import android.content.SharedPreferences
 import android.graphics.Color
 
 /**
- * Ponto único de leitura do SharedPreferences "GuardianShieldPrefs" — o mesmo arquivo que
- * o app Capacitor (MainActivity/PauseModule) grava a partir do estado sincronizado por
- * Socket.IO. A Home/Gaveta nativas (LauncherHomeActivity/LauncherDrawerActivity) e o
- * ParentalAccessibilityService leem daqui, então mudanças de chave só precisam ser feitas
- * neste arquivo.
+ * Ponto único de leitura do SharedPreferences "GuardianShieldPrefs". O
+ * ParentalAccessibilityService grava aqui as regras que vêm do backend; a Home/Gaveta
+ * nativas, a tela de bloqueio e o painel (PainelActivity) leem daqui, então mudanças de
+ * chave só precisam ser feitas neste arquivo.
  */
 object GuardianPrefs {
     private const val PREFS_NAME = "GuardianShieldPrefs"
@@ -174,16 +173,11 @@ object GuardianPrefs {
     }
 
     // --- Tarefas diárias + regras de bloqueio (pausa geral, apps bloqueados, limite diário):
-    // o backend é a fonte da verdade (o pai edita tudo isso pelo app dele). O nativo NÃO tem
-    // cliente socket.io (só a WebView tem, e ela raramente está aberta — a criança usa a
-    // Home/Gaveta nativas no dia a dia) — por isso o ParentalAccessibilityService consulta
-    // GET /api/tasks/sync por HTTP simples a cada ciclo do seu ticker (~60s) e grava o
-    // resultado aqui, pra tudo isso valer mesmo se a criança nunca abrir a WebView. A Home
-    // nativa e o próprio serviço leem só daqui, nunca da rede diretamente, então continuam
-    // funcionando com o último valor conhecido mesmo se o próximo poll falhar (sem internet,
-    // servidor fora do ar, etc). A WebView também grava essas mesmas chaves quando está
-    // aberta (ver MainActivity.PauseModule) — os dois caminhos escrevem os mesmos valores
-    // que o backend manda, então não há conflito entre eles. ---
+    // o backend é a fonte da verdade (o pai edita tudo isso pelo app dele). O
+    // ParentalAccessibilityService consulta GET /api/tasks/sync (long-poll — volta na hora
+    // quando o pai muda algo) e grava o resultado aqui. A Home, a tela de bloqueio e o
+    // painel leem só daqui, nunca da rede diretamente, então continuam funcionando com o
+    // último valor conhecido mesmo sem internet. ---
 
     private const val KEY_TASK_UNLOCK_MODE = "taskUnlockMode"
     private const val KEY_TASKS_SYNC_JSON = "tasksSyncJson"
@@ -387,8 +381,17 @@ object GuardianPrefs {
     fun isTaskSubmissionWindowActive(context: Context): Boolean =
         System.currentTimeMillis() < of(context).getLong(KEY_TASK_SUBMISSION_UNTIL, 0L)
 
+    // Cache do último parse (a mesma string é lida várias vezes por troca de app — motivo
+    // do bloqueio, tela de bloqueio, Home…) — só reprocessa quando o JSON salvo muda.
+    @Volatile private var parsedTasksCache: Pair<String, List<TaskItem>>? = null
+
     fun parsedTodayTasks(context: Context): List<TaskItem> {
         val raw = of(context).getString(KEY_TASKS_SYNC_JSON, null) ?: return emptyList()
+        parsedTasksCache?.let { (cachedRaw, tasks) -> if (cachedRaw == raw) return tasks }
+        return parseTasks(raw).also { parsedTasksCache = raw to it }
+    }
+
+    private fun parseTasks(raw: String): List<TaskItem> {
         return try {
             val root = org.json.JSONObject(raw)
             val dailyTasks = root.optJSONArray("dailyTasks") ?: org.json.JSONArray()
@@ -431,18 +434,18 @@ object GuardianPrefs {
         return tasks.any { it.status != "approved" && !isTaskSnoozed(it) }
     }
 
-    // --- Token de dispositivo (JWT) devolvido pelo backend ao completar o pareamento —
-    // ver child:pair_result em App.jsx e MainActivity.PauseModule.setDeviceToken. Sem
-    // expiração (perder o pareamento = parear de novo, igual antes). O
-    // ParentalAccessibilityService anexa em toda chamada HTTP (header X-Device-Token) pra
-    // o backend resolver a família certa em vez do fallback de família legada — ver
-    // resolveDeviceFamily em server.js. Continua funcionando sem token nenhum (aparelhos
-    // pareados antes dessa versão): o backend simplesmente cai no fallback. ---
+    // --- Token de dispositivo (JWT) devolvido pelo backend ao completar o pareamento (ver
+    // PainelActivity.parear). Sem expiração (perder o pareamento = parear de novo). Vai em
+    // toda chamada HTTP (header X-Device-Token) pra o backend resolver a família certa —
+    // ver resolveDeviceFamily em server.js. ---
 
     private const val KEY_DEVICE_TOKEN = "deviceToken"
 
     fun deviceToken(context: Context): String? =
         of(context).getString(KEY_DEVICE_TOKEN, null)?.takeIf { it.isNotBlank() }
+
+    /** Pareado = já recebeu um token de dispositivo do backend (ver PainelActivity). */
+    fun isPaired(context: Context): Boolean = deviceToken(context) != null
 
     fun setDeviceToken(context: Context, token: String?) {
         val editor = of(context).edit()
@@ -462,7 +465,7 @@ object GuardianPrefs {
     /** Registra que `packageName` acabou de entrar em 1º plano — chamado só numa troca de
      * app DE VERDADE (ver lastForegroundPackage em ParentalAccessibilityService), nunca a
      * cada evento de acessibilidade solto. */
-    fun recordAppOpened(context: Context, packageName: String, appLabel: String) {
+    fun recordAppOpened(context: Context, packageName: String, appLabel: String, openedAt: Long = System.currentTimeMillis()) {
         val prefs = of(context)
         val current = try {
             org.json.JSONArray(prefs.getString(KEY_APP_HISTORY_QUEUE, null) ?: "[]")
@@ -473,7 +476,7 @@ object GuardianPrefs {
             org.json.JSONObject()
                 .put("package", packageName)
                 .put("name", appLabel)
-                .put("timestamp", System.currentTimeMillis())
+                .put("timestamp", openedAt)
         )
         // Corta as mais antigas se a fila crescer demais (ex: dias sem internet) — perde
         // histórico bem antigo em vez de crescer sem limite no disco.

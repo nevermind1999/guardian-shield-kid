@@ -68,6 +68,7 @@ class AppGridAdapter(
         (isPaused || pkg in blockedPackages) && pkg !in alwaysAvailablePackages
 
     fun updateBlockedState(blocked: Set<String>, paused: Boolean, alwaysAvailable: Set<String> = emptySet()) {
+        if (blocked == blockedPackages && paused == isPaused && alwaysAvailable == alwaysAvailablePackages) return
         blockedPackages = blocked
         isPaused = paused
         alwaysAvailablePackages = alwaysAvailable

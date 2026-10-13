@@ -40,4 +40,33 @@ object NetworkHelper {
         }
         return false
     }
+
+    /** Resposta crua (código HTTP + corpo) de um POST — pra quando o corpo importa mesmo
+     * em erro (ex: pareamento devolve 400 com a mensagem "código inválido" no JSON).
+     * null = nenhum candidato respondeu (sem internet / servidor fora). Bloqueante. */
+    @JvmStatic
+    fun postJsonResponse(context: Context, path: String, jsonBody: String): Pair<Int, String>? {
+        val candidates = (listOfNotNull(GuardianPrefs.lastWorkingServerUrl(context)) + ServerConfig.SERVER_URL_CANDIDATES).distinct()
+        for (baseUrl in candidates) {
+            try {
+                val connection = URL("$baseUrl$path").openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.connectTimeout = 6_000
+                connection.readTimeout = 8_000
+                connection.setRequestProperty("Content-Type", "application/json")
+                GuardianPrefs.deviceToken(context)?.let { connection.setRequestProperty("X-Device-Token", it) }
+                connection.outputStream.use { it.write(jsonBody.toByteArray(Charsets.UTF_8)) }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                connection.disconnect()
+                GuardianPrefs.setLastWorkingServerUrl(context, baseUrl)
+                return code to body
+            } catch (e: Exception) {
+                // Tenta o próximo candidato.
+            }
+        }
+        return null
+    }
 }

@@ -61,6 +61,10 @@ import java.util.Set;
  * vez que a tela liga de novo (ver ParentalAccessibilityService), só nessa tela.
  */
 public class LockOverlayService extends Service {
+    // Lido pelo ParentalAccessibilityService pra não mandar "mostra/esconde" à toa a cada
+    // troca de janela (cada startService acorda este serviço na thread principal).
+    public static volatile boolean showing = false;
+
     // Janela de exceção temporária pro bloqueio (ver GuardianPrefs.setTaskSubmissionAllowedUntil):
     // tempo suficiente pra abrir a câmera do sistema, tirar a foto e voltar sem ser
     // barrado de volta pra essa tela no meio do caminho.
@@ -363,6 +367,10 @@ public class LockOverlayService extends Service {
             windowManager.addView(scrollRoot, params);
             overlayView = scrollRoot;
             isShowing = true;
+            showing = true;
+            // Entra suave em vez de "pipocar" na tela.
+            scrollRoot.setAlpha(0f);
+            scrollRoot.animate().alpha(1f).setDuration(180).start();
             stealAudioFocusToPauseMedia();
             if (catGameView != null) catGameView.start();
         } catch (Exception e) {
@@ -1607,6 +1615,7 @@ public class LockOverlayService extends Service {
             taskListContainer = null;
             contentLayout = null;
             isShowing = false;
+            showing = false;
             releaseAudioFocus();
         }
     }

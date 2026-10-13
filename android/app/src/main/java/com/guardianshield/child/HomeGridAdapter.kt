@@ -39,12 +39,15 @@ class HomeGridAdapter(
     private var hoverTargetPosition: Int? = null
 
     fun updateItems(newItems: List<HomeItem>, newAppsByPackage: Map<String, AppEntry>) {
+        // Sem mudança real (o caso comum a cada sincronização), não redesenha a grade.
+        if (newItems == items && newAppsByPackage == appsByPackage) return
         items = newItems
         appsByPackage = newAppsByPackage
         notifyDataSetChanged()
     }
 
     fun updateBlockedState(blocked: Set<String>, paused: Boolean, alwaysAvailable: Set<String> = emptySet()) {
+        if (blocked == blockedPackages && paused == isPaused && alwaysAvailable == alwaysAvailablePackages) return
         blockedPackages = blocked
         isPaused = paused
         alwaysAvailablePackages = alwaysAvailable

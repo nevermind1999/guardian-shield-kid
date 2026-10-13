@@ -57,28 +57,34 @@ class ParentalAccessibilityService : AccessibilityService() {
     )
 
     companion object {
-        /** Cadência do ruleSyncTicker — ver startRuleSyncTicker(). */
-        private const val RULE_SYNC_INTERVAL_MS = 15_000L
+        /** Quanto o backend pode segurar cada consulta de regras esperando uma mudança. */
+        private const val RULE_SYNC_WAIT_SECONDS = 25
+        /** Espera entre tentativas quando a consulta falha (sem internet etc), crescente. */
+        private const val RULE_SYNC_RETRY_MIN_MS = 5_000L
+        private const val RULE_SYNC_RETRY_MAX_MS = 60_000L
     }
 
     private val tickHandler = Handler(Looper.getMainLooper())
     private var tickRunnable: Runnable? = null
 
     // Sincronização de regras (pausa geral, tarefas, limite diário, liberação manual do
-    // pai — ver parent:grant_bonus_time) roda numa cadência PRÓPRIA, separada do tick de
-    // 1min de uso/localização/telemetria e bem mais rápida (RULE_SYNC_INTERVAL_MS) — é
-    // essa cadência que decide quanto tempo demora até uma mudança do pai chegar de
-    // verdade no aparelho da criança. Fica separada de propósito: acelerar TUDO junto
-    // multiplicaria GPS/telemetria à toa (custo de bateria/rede) sem reduzir o atraso que
-    // realmente importa, que é só a checagem de regras/bloqueio.
-    private val ruleSyncHandler = Handler(Looper.getMainLooper())
-    private var ruleSyncRunnable: Runnable? = null
+    // pai) por long-poll — ver startRuleSyncLoop. Thread própria, porque cada consulta pode
+    // ficar até RULE_SYNC_WAIT_SECONDS aberta esperando o pai mudar algo; separada do tick
+    // de 1min de uso/localização/telemetria, que continua no ritmo dele.
+    private val ruleSyncExecutor = Executors.newSingleThreadExecutor()
+    @Volatile private var ruleSyncRunning = false
+    // Versão das regras que este aparelho já tem (syncVersion devolvido pelo backend).
+    @Volatile private var ruleSyncVersion: String? = null
 
     // Consulta HTTP simples (o serviço não tem cliente socket.io, só a WebView tem) —
     // roda numa thread própria pra nunca bloquear a main thread do tick. Compartilhada
     // pelos dois tickers (usage e rule sync); por ser single-thread, as chamadas dos dois
     // sempre executam em série, nunca concorrem entre si.
     private val networkExecutor = Executors.newSingleThreadExecutor()
+
+    // Gravar o histórico de apps abertos mexe num JSON de até 100 entradas — fora da thread
+    // principal, pra troca de app não esperar por isso.
+    private val historyExecutor = Executors.newSingleThreadExecutor()
 
     // Última resposta do poll de regras (GPS/sincronizar forçados pelo pai) — escrita pelo
     // ruleSyncTicker (a cada ~15s) e lida pelo tick de uso (a cada 60s, que é quem de fato
@@ -123,7 +129,7 @@ class ParentalAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         startUsageTicker()
-        startRuleSyncTicker()
+        startRuleSyncLoop()
         if (!screenStateReceiverRegistered) {
             registerReceiver(screenStateReceiver, IntentFilter(Intent.ACTION_SCREEN_ON))
             screenStateReceiverRegistered = true
@@ -158,23 +164,35 @@ class ParentalAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Cadência rápida só pra sincronizar regras (pollRulesSync) — 15s em vez do 1min do
-     * tick de uso. `pollRulesSync` já dispara `reevaluateBlockState()` sozinho assim que a
-     * resposta chega (ver o `tickHandler.post` no fim dela), então isto sozinho já é o
-     * suficiente pra reduzir de até 60s pra até ~15s o atraso entre o pai mudar algo
-     * (Pausa Geral, liberar tempo, aprovar tarefa, ajustar limite) e o filho aplicar de
-     * verdade — sem mexer no ritmo de bateria/localização/telemetria do outro ticker.
+     * Sincronização de regras por long-poll: a consulta manda a versão que o aparelho já
+     * tem e o backend só responde quando algo muda (ou depois de RULE_SYNC_WAIT_SECONDS) —
+     * Pausa Geral, liberar tempo, aprovar tarefa etc. chegam no celular em ~1s, em vez de
+     * até 15s com a consulta periódica de antes, e com menos requisições. Se a consulta
+     * falha (sem internet), espera um pouco mais a cada vez antes de tentar de novo.
      */
-    private fun startRuleSyncTicker() {
-        ruleSyncRunnable?.let { ruleSyncHandler.removeCallbacks(it) }
-        val runnable = object : Runnable {
-            override fun run() {
-                networkExecutor.execute { pendingSyncFlags = pollRulesSync() }
-                ruleSyncHandler.postDelayed(this, RULE_SYNC_INTERVAL_MS)
+    private fun startRuleSyncLoop() {
+        if (ruleSyncRunning) return
+        ruleSyncRunning = true
+        ruleSyncExecutor.execute {
+            var retryDelay = RULE_SYNC_RETRY_MIN_MS
+            while (ruleSyncRunning) {
+                val flags = pollRulesSync(waitSeconds = if (ruleSyncVersion != null) RULE_SYNC_WAIT_SECONDS else 0)
+                if (flags != null) {
+                    retryDelay = RULE_SYNC_RETRY_MIN_MS
+                    pendingSyncFlags = flags
+                    // Pedido do pai de GPS/sincronizar: atende já, sem esperar o tick de 1min.
+                    if (flags.forceFreshLocation) networkExecutor.execute { fetchLocationAndReport(true) }
+                    if (flags.forceDeviceSync) networkExecutor.execute { postDeviceTelemetry() }
+                    // Backend antigo (sem long-poll, não manda versão): consulta periódica.
+                    if (ruleSyncVersion == null) {
+                        try { Thread.sleep(RULE_SYNC_RETRY_MIN_MS) } catch (e: InterruptedException) { return@execute }
+                    }
+                } else {
+                    try { Thread.sleep(retryDelay) } catch (e: InterruptedException) { return@execute }
+                    retryDelay = (retryDelay * 2).coerceAtMost(RULE_SYNC_RETRY_MAX_MS)
+                }
             }
         }
-        ruleSyncRunnable = runnable
-        ruleSyncHandler.postDelayed(runnable, RULE_SYNC_INTERVAL_MS)
     }
 
     private fun tickUsageOnce() {
@@ -195,9 +213,9 @@ class ParentalAccessibilityService : AccessibilityService() {
 
         tickCount++
         networkExecutor.execute {
-            // A sincronização de regras em si roda no ruleSyncTicker (a cada ~15s, ver
-            // startRuleSyncTicker) — aqui só consome o resultado mais recente pra decidir
-            // se precisa buscar localização/telemetria "forçadas" neste ciclo de 1min.
+            // A sincronização de regras em si roda no long-poll (ver startRuleSyncLoop) —
+            // aqui só consome o resultado mais recente pra decidir se precisa buscar
+            // localização/telemetria "forçadas" neste ciclo de 1min.
             val syncFlags = pendingSyncFlags
             if (tickCount % 5 == 0) postInstalledApps()
             if (GuardianPrefs.pendingPinUnlockAck(this)) ackPinUnlock()
@@ -273,17 +291,20 @@ class ParentalAccessibilityService : AccessibilityService() {
      * em caso de falha (sem internet, servidor fora do ar), mantém o último valor
      * conhecido. Retorna quais atualizações forçadas o pai pediu nesse ciclo (GPS/sincronizar).
      */
-    private fun pollRulesSync(): SyncFlags {
-        for (baseUrl in ServerConfig.SERVER_URL_CANDIDATES) {
+    private fun pollRulesSync(waitSeconds: Int): SyncFlags? {
+        val candidates = (listOfNotNull(GuardianPrefs.lastWorkingServerUrl(this)) + ServerConfig.SERVER_URL_CANDIDATES).distinct()
+        val query = ruleSyncVersion?.takeIf { waitSeconds > 0 }?.let { "?wait=$waitSeconds&v=$it" }.orEmpty()
+        for (baseUrl in candidates) {
             try {
-                val connection = URL("$baseUrl/api/tasks/sync").openConnection() as HttpURLConnection
-                connection.connectTimeout = 4_000
-                connection.readTimeout = 4_000
+                val connection = URL("$baseUrl/api/tasks/sync$query").openConnection() as HttpURLConnection
+                connection.connectTimeout = 5_000
+                connection.readTimeout = (waitSeconds + 10) * 1_000
                 connection.requestMethod = "GET"
                 GuardianPrefs.deviceToken(this)?.let { connection.setRequestProperty("X-Device-Token", it) }
                 if (connection.responseCode == 200) {
                     val body = connection.inputStream.bufferedReader().use { it.readText() }
                     val json = JSONObject(body)
+                    ruleSyncVersion = json.optString("syncVersion").takeIf { it.isNotEmpty() }
                     val blockedPackagesArray = json.optJSONArray("blockedPackages") ?: JSONArray()
                     val blockedPackages = (0 until blockedPackagesArray.length())
                         .map { blockedPackagesArray.getString(it) }
@@ -355,7 +376,7 @@ class ParentalAccessibilityService : AccessibilityService() {
                 // Tenta o próximo candidato; se nenhum responder, mantém o cache antigo.
             }
         }
-        return SyncFlags(forceFreshLocation = false, forceDeviceSync = false)
+        return null
     }
 
     /**
@@ -624,7 +645,7 @@ class ParentalAccessibilityService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         tickRunnable?.let { tickHandler.removeCallbacks(it) }
-        ruleSyncRunnable?.let { ruleSyncHandler.removeCallbacks(it) }
+        ruleSyncRunning = false
         if (screenStateReceiverRegistered) {
             try { unregisterReceiver(screenStateReceiver) } catch (e: Exception) { /* já desregistrado */ }
             screenStateReceiverRegistered = false
@@ -664,7 +685,8 @@ class ParentalAccessibilityService : AccessibilityService() {
             // Exclui o próprio GuardianShield: "voltou pra Home" não é um app que o pai
             // precisa ver no histórico de uso.
             if (packageName != previousPackage && packageName != this.packageName) {
-                GuardianPrefs.recordAppOpened(this, packageName, getAppNameFromPackage(packageName))
+                val openedAt = System.currentTimeMillis()
+                historyExecutor.execute { GuardianPrefs.recordAppOpened(this, packageName, getAppNameFromPackage(packageName), openedAt) }
             }
             lastForegroundPackage = packageName
             reevaluateBlockState()
@@ -815,7 +837,14 @@ class ParentalAccessibilityService : AccessibilityService() {
         }
     }
 
+    // Assinatura do último "mostra" enviado — o mesmo bloqueio reavaliado de novo (cada troca
+    // de janela, cada tick, cada sincronização) não precisa reenviar nada pro serviço.
+    private var lastOverlaySignature: String? = null
+
     private fun showOverlay(title: String, message: String, allowPinUnlock: Boolean, allowTaskSubmission: Boolean = false, iconType: String = "lock") {
+        val signature = "$title|$message|$allowPinUnlock|$allowTaskSubmission|$iconType"
+        if (LockOverlayService.showing && signature == lastOverlaySignature) return
+        lastOverlaySignature = signature
         val overlayIntent = Intent(this, LockOverlayService::class.java)
         overlayIntent.action = "SHOW_OVERLAY"
         overlayIntent.putExtra("title", title)
@@ -827,6 +856,8 @@ class ParentalAccessibilityService : AccessibilityService() {
     }
 
     private fun hideOverlay() {
+        lastOverlaySignature = null
+        if (!LockOverlayService.showing) return
         val overlayIntent = Intent(this, LockOverlayService::class.java)
         overlayIntent.action = "HIDE_OVERLAY"
         startService(overlayIntent)
@@ -841,6 +872,9 @@ class ParentalAccessibilityService : AccessibilityService() {
      * sobreposição por cima dela também, já que ela não tem mais exceção especial.
      */
     private fun bringGuardianShieldToFront() {
+        // Já está num app nosso (Home/painel por baixo da tela de bloqueio): nada a fazer —
+        // relançar a Home a cada reavaliação só a fazia redesenhar à toa.
+        if (lastForegroundPackage == packageName) return
         val intent = Intent(this, LauncherHomeActivity::class.java)
         intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         startActivity(intent)

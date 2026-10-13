@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="colorPrimary">#F97316</color>
+    <color name="colorPrimaryDark">#0C0A09</color>
+    <color name="colorAccent">#F97316</color>
+    <color name="painelFundo">#0C0A09</color>
+    <color name="painelTexto">#FAFAF9</color>
+    <color name="painelTextoSuave">#A8A29E</color>
+    <color name="painelOk">#10B981</color>
+    <color name="painelAlerta">#F43F5E</color>
+    <color name="painelAtencao">#EAB308</color>
+</resources>

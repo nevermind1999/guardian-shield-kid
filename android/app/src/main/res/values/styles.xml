@@ -16,8 +16,11 @@
     </style>
 
 
-    <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
-        <item name="android:background">@drawable/splash</item>
+    <!-- Painel (PainelActivity): fundo escuro já na janela, sem flash branco ao abrir. -->
+    <style name="AppTheme.Painel" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/painelFundo</item>
+        <item name="colorAccent">@color/colorAccent</item>
+        <item name="android:textCursorDrawable">@null</item>
     </style>
 
     <!-- Tema da Home nativa: pede ao sistema pra desenhar o papel de parede real por trás

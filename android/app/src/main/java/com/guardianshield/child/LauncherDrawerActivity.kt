@@ -76,12 +76,8 @@ class LauncherDrawerActivity : AppCompatActivity() {
      * caso a gaveta já estivesse aberta quando a desinstalação aconteceu. */
     private val packageChangeReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            allApps = AppRepository.loadLaunchableApps(this@LauncherDrawerActivity)
-            adapter.updatePinnedApps(sortedApps())
-            setupCategoryChips()
-            adapter.filterByCategory(selectedCategory)
-            updateEmptyState()
-            refreshBlockedState()
+            AppRepository.invalidate()
+            reloadAppsInBackground()
         }
     }
 
@@ -101,7 +97,10 @@ class LauncherDrawerActivity : AppCompatActivity() {
         }
 
         prefs = GuardianPrefs.of(this)
-        allApps = AppRepository.loadLaunchableApps(this)
+        // Normalmente já está em cache (a Home montou a lista) — abre na hora. Se não
+        // estiver, abre vazia e preenche assim que a lista ficar pronta em segundo plano.
+        val cachedApps = AppRepository.cachedIfFresh(this)
+        allApps = cachedApps ?: emptyList()
         emptyDrawerHint = findViewById(R.id.emptyDrawerHint)
         categoryChipsRow = findViewById(R.id.categoryChipsRow)
         setupCategoryChips()
@@ -141,6 +140,29 @@ class LauncherDrawerActivity : AppCompatActivity() {
             override fun afterTextChanged(s: Editable?) {}
         })
         updateEmptyState()
+        if (cachedApps == null) reloadAppsInBackground()
+    }
+
+    private val appLoader = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    override fun onDestroy() {
+        super.onDestroy()
+        appLoader.shutdown()
+    }
+
+    private fun reloadAppsInBackground() {
+        appLoader.execute {
+            val loaded = AppRepository.loadLaunchableApps(this)
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                allApps = loaded
+                adapter.updatePinnedApps(sortedApps())
+                setupCategoryChips()
+                adapter.filterByCategory(selectedCategory)
+                updateEmptyState()
+                refreshBlockedState()
+            }
+        }
     }
 
     override fun onResume() {

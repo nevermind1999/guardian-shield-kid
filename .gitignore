@@ -26,3 +26,5 @@ android/captures/
 .DS_Store
 Thumbs.db
 *.log
+android/local.properties
+android/.kotlin/
