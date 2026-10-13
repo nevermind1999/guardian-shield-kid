@@ -171,7 +171,7 @@ class PainelActivity : AppCompatActivity() {
         botaoParear.setOnClickListener { parear() }
         botaoPedirTempo.setOnClickListener { abrirPedidoTempo() }
 
-        rodape.text = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL} · versão ${BuildConfig.GIT_SHA}"
+        rodape.text = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL} · versão ${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_SHA})"
 
         verificarAtualizacao()
         if (intent.getBooleanExtra(EXTRA_ABRIR_PEDIDO_TEMPO, false)) {
@@ -614,7 +614,7 @@ class PainelActivity : AppCompatActivity() {
                 notasAtualizacao.text = update.notes
                 bannerAtualizacao.visibility = View.VISIBLE
                 findViewById<View>(R.id.painelAtualizacaoFechar).setOnClickListener {
-                    AppUpdater.dismiss(this, update.sha)
+                    AppUpdater.dismiss(this, update.version)
                     bannerAtualizacao.visibility = View.GONE
                 }
                 findViewById<View>(R.id.painelAtualizarBotao).setOnClickListener {
@@ -623,8 +623,8 @@ class PainelActivity : AppCompatActivity() {
                             this, downloadConcluido, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), ContextCompat.RECEIVER_EXPORTED
                         )
                     }
-                    downloadId = AppUpdater.startDownload(this)
-                    AppUpdater.dismiss(this, update.sha)
+                    downloadId = AppUpdater.startDownload(this, update.apkUrl)
+                    AppUpdater.dismiss(this, update.version)
                     bannerAtualizacao.visibility = View.GONE
                     Toast.makeText(this, "Baixando a atualização…", Toast.LENGTH_SHORT).show()
                 }

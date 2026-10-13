@@ -1,8 +1,8 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
-// Commit em que este APK foi compilado — o painel compara com o último commit da main no
-// GitHub pra avisar que tem versão nova (ver util/AppUpdater.kt).
+// Commit em que este APK foi compilado — aparece no rodapé do painel ao lado da versão. O
+// aviso de atualização usa o versionName (ver util/AppUpdater.kt).
 def gitSha = { ->
     try {
         def out = new ByteArrayOutputStream()
